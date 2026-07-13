@@ -103,18 +103,7 @@
 </head>
 <body>
 
-<div id="loginScreen">
-  <div class="login-box">
-    <div class="eyebrow">4x4 Factory SA</div>
-    <h1>Hotspot Admin</h1>
-    <p class="sub">Enter the admin password to continue.</p>
-    <input type="text" id="loginPassword" placeholder="Password" onkeydown="if(event.key==='Enter') doLogin()">
-    <button class="btn gold" style="width:100%;" onclick="doLogin()">Log in</button>
-    <div class="login-error" id="loginError"></div>
-  </div>
-</div>
-
-<div id="app" class="hidden">
+<div id="app">
 
   <div class="topbar">
     <div>
@@ -122,7 +111,6 @@
       <h1>Hotspot Admin</h1>
       <p class="sub">Vehicles with fitment hotspots linked to real products on the store.</p>
     </div>
-    <button class="btn rust" onclick="doLogout()">Log out</button>
   </div>
 
   <!-- Vehicle list view -->
@@ -210,48 +198,10 @@ let pinCounter = 0;
 let searchDebounce = null;
 
 async function api(path, opts={}){
-  const res = await fetch(path, {
+  return fetch(path, {
     headers: {'Content-Type':'application/json'},
     ...opts,
   });
-  if(res.status === 401){ showLogin(); throw new Error('Not authenticated'); }
-  return res;
-}
-
-// ---- Auth ----
-async function checkSession(){
-  const res = await fetch('/api/admin/session');
-  const data = await res.json();
-  if(data.isAdmin){ showApp(); } else { showLogin(); }
-}
-function showLogin(){
-  document.getElementById('loginScreen').classList.remove('hidden');
-  document.getElementById('app').classList.add('hidden');
-}
-function showApp(){
-  document.getElementById('loginScreen').classList.add('hidden');
-  document.getElementById('app').classList.remove('hidden');
-  loadVehicles();
-}
-async function doLogin(){
-  const password = document.getElementById('loginPassword').value;
-  const errEl = document.getElementById('loginError');
-  errEl.textContent = 'Logging in…';
-  try{
-    const res = await fetch('/api/admin/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password})});
-    if(res.ok){ errEl.textContent = ''; showApp(); }
-    else {
-      const data = await res.json().catch(()=>({}));
-      errEl.textContent = data.error || ('Login failed (status ' + res.status + ')');
-    }
-  }catch(err){
-    console.error(err);
-    errEl.textContent = 'Network error: ' + err.message;
-  }
-}
-async function doLogout(){
-  await fetch('/api/admin/logout', {method:'POST'});
-  showLogin();
 }
 
 // ---- Vehicle list ----
@@ -516,7 +466,7 @@ async function refreshFromShopify(){
   alert('Refreshed from Shopify.');
 }
 
-checkSession();
+loadVehicles();
 </script>
 </body>
 </html>

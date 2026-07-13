@@ -4,13 +4,10 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const multer = require('multer');
-const cookieSession = require('cookie-session');
 const Database = require('better-sqlite3');
 
 const {
   PORT = 3000,
-  ADMIN_PASSWORD = 'changeme',
-  SESSION_SECRET = 'dev-secret-change-me',
   SHOPIFY_STORE_DOMAIN,
   SHOPIFY_CLIENT_ID,
   SHOPIFY_CLIENT_SECRET,
@@ -189,48 +186,14 @@ async function uploadImageToShopifyFiles(buffer, filename, mimeType) {
 // ---------------------------------------------------------------------------
 const app = express();
 app.use(express.json({ limit: '2mb' }));
-app.use(
-  cookieSession({
-    name: 'hs_session',
-    secret: SESSION_SECRET,
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-    sameSite: 'lax',
-  })
-);
 app.use(express.static(path.join(__dirname, 'public')));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
-function requireAdmin(req, res, next) {
-  if (req.session && req.session.isAdmin) return next();
-  res.status(401).json({ error: 'Not authenticated' });
-}
-
 // ---------------------------------------------------------------------------
-// Admin auth
+// Shopify product search + image upload
 // ---------------------------------------------------------------------------
-app.post('/api/admin/login', (req, res) => {
-  const { password } = req.body || {};
-  if (password && password === ADMIN_PASSWORD) {
-    req.session.isAdmin = true;
-    return res.json({ ok: true });
-  }
-  res.status(401).json({ error: 'Wrong password' });
-});
-
-app.post('/api/admin/logout', (req, res) => {
-  req.session = null;
-  res.json({ ok: true });
-});
-
-app.get('/api/admin/session', (req, res) => {
-  res.json({ isAdmin: !!(req.session && req.session.isAdmin) });
-});
-
-// ---------------------------------------------------------------------------
-// Shopify product search + image upload (admin only)
-// ---------------------------------------------------------------------------
-app.get('/api/admin/shopify/search-products', requireAdmin, async (req, res) => {
+app.get('/api/admin/shopify/search-products', async (req, res) => {
   try {
     const results = await searchShopifyProducts(req.query.q || '');
     res.json(results);
@@ -240,7 +203,7 @@ app.get('/api/admin/shopify/search-products', requireAdmin, async (req, res) => 
   }
 });
 
-app.post('/api/admin/upload-image', requireAdmin, upload.single('image'), async (req, res) => {
+app.post('/api/admin/upload-image', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const url = await uploadImageToShopifyFiles(
@@ -256,9 +219,9 @@ app.post('/api/admin/upload-image', requireAdmin, upload.single('image'), async 
 });
 
 // ---------------------------------------------------------------------------
-// Vehicle + hotspot CRUD (admin only)
+// Vehicle + hotspot CRUD
 // ---------------------------------------------------------------------------
-app.get('/api/admin/vehicles', requireAdmin, (req, res) => {
+app.get('/api/admin/vehicles', (req, res) => {
   const vehicles = db.prepare('SELECT * FROM vehicles ORDER BY updated_at DESC').all();
   const withHotspots = vehicles.map((v) => ({
     ...v,
@@ -269,7 +232,7 @@ app.get('/api/admin/vehicles', requireAdmin, (req, res) => {
   res.json(withHotspots);
 });
 
-app.get('/api/admin/vehicles/:id', requireAdmin, (req, res) => {
+app.get('/api/admin/vehicles/:id', (req, res) => {
   const v = db.prepare('SELECT * FROM vehicles WHERE id = ?').get(req.params.id);
   if (!v) return res.status(404).json({ error: 'Not found' });
   v.hotspots = db
@@ -280,7 +243,7 @@ app.get('/api/admin/vehicles/:id', requireAdmin, (req, res) => {
 
 // Create or update a vehicle + its full hotspot list in one call.
 // Body: { id?, name, imageUrl, hotspots: [{x,y,label,desc,productId,productHandle,productTitle,productPrice,productImage,variantId}] }
-app.post('/api/admin/vehicles', requireAdmin, (req, res) => {
+app.post('/api/admin/vehicles', (req, res) => {
   const { id, name, imageUrl, hotspots = [] } = req.body || {};
   if (!name || !imageUrl) return res.status(400).json({ error: 'name and imageUrl are required' });
 
@@ -333,7 +296,7 @@ app.post('/api/admin/vehicles', requireAdmin, (req, res) => {
   res.json({ id: vehicleId, slug });
 });
 
-app.delete('/api/admin/vehicles/:id', requireAdmin, (req, res) => {
+app.delete('/api/admin/vehicles/:id', (req, res) => {
   db.prepare('DELETE FROM hotspots WHERE vehicle_id = ?').run(req.params.id);
   db.prepare('DELETE FROM vehicles WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
@@ -341,7 +304,7 @@ app.delete('/api/admin/vehicles/:id', requireAdmin, (req, res) => {
 
 // Re-pull title/price/image for every hotspot on a vehicle from Shopify,
 // in case a linked product's price or title changed since it was picked.
-app.post('/api/admin/vehicles/:id/refresh', requireAdmin, async (req, res) => {
+app.post('/api/admin/vehicles/:id/refresh', async (req, res) => {
   try {
     const hotspots = db
       .prepare('SELECT * FROM hotspots WHERE vehicle_id = ?')
