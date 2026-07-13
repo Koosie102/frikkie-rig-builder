@@ -344,7 +344,10 @@ app.post('/api/admin/vehicles/:id/refresh', async (req, res) => {
 // ---------------------------------------------------------------------------
 // Public API — consumed by the storefront embed script
 // ---------------------------------------------------------------------------
+// This runs on a different domain to the Shopify page that calls it, so it
+// needs CORS allowed explicitly or the browser blocks the fetch silently.
 app.get('/api/vehicles/:slug', (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
   const v = db.prepare('SELECT * FROM vehicles WHERE slug = ?').get(req.params.slug);
   if (!v) return res.status(404).json({ error: 'Not found' });
   const hotspots = db
@@ -456,11 +459,15 @@ app.get('/embed.js', (req, res) => {
   document.querySelectorAll('[data-fxf-hotspot]').forEach(function(root){
     var slug = root.getAttribute('data-fxf-hotspot');
     fetch(API_BASE + '/api/vehicles/' + encodeURIComponent(slug))
-      .then(function(r){ return r.json(); })
+      .then(function(r){
+        if(!r.ok) throw new Error('Hotspot API returned ' + r.status + ' for slug "' + slug + '"');
+        return r.json();
+      })
       .then(function(data){
-        if(data.error){ root.textContent = ''; return; }
+        if(data.error){ console.error('Hotspot widget:', data.error); return; }
         render(root, data);
-      });
+      })
+      .catch(function(err){ console.error('Hotspot widget failed to load:', err); });
   });
 })();
 `);
