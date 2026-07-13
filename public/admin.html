@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>4x4 Factory SA — Hotspot Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#151310; --panel:#1c1914; --panel-2:#211d17; --line:#3a3428;
+    --khaki:#6b6748; --parchment:#ece4d3; --parchment-dim:#a89f8c;
+    --gold:#d9a441; --rust:#c1541f; --ok:#7a8b56;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{background:var(--ink);color:var(--parchment);font-family:'Inter',sans-serif;min-height:100vh;}
+  .hidden{display:none !important;}
+  .eyebrow{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:var(--gold);display:flex;align-items:center;gap:8px;}
+  .eyebrow::before{content:"";width:22px;height:1px;background:var(--gold);}
+  h1{font-family:'Oswald',sans-serif;font-weight:700;font-size:24px;text-transform:uppercase;margin:6px 0 4px;}
+  .sub{color:var(--parchment-dim);font-size:13px;max-width:520px;line-height:1.5;}
+
+  /* ---- Login ---- */
+  #loginScreen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
+  .login-box{background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:30px;width:320px;}
+  .login-box input{width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--parchment);padding:10px;border-radius:3px;margin:14px 0;font-size:14px;}
+  .login-error{color:var(--rust);font-size:12.5px;font-family:'JetBrains Mono',monospace;min-height:16px;}
+
+  /* ---- App shell ---- */
+  #app{padding:24px;max-width:1280px;margin:0 auto;}
+  .topbar{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:22px;}
+  .btn{font-family:'Oswald',sans-serif;font-weight:600;font-size:12.5px;letter-spacing:0.03em;text-transform:uppercase;border:1px solid var(--line);background:var(--panel-2);color:var(--parchment);padding:10px 14px;border-radius:3px;cursor:pointer;transition:all .15s ease;}
+  .btn:hover{border-color:var(--gold);color:var(--gold);}
+  .btn.gold{background:var(--gold);color:var(--ink);border-color:var(--gold);}
+  .btn.gold:hover{background:#eab857;}
+  .btn.rust{border-color:var(--rust);color:var(--rust);background:none;}
+  .btn.rust:hover{background:var(--rust);color:var(--parchment);}
+  .btn:disabled{opacity:0.35;cursor:not-allowed;}
+
+  /* ---- Vehicle list ---- */
+  .grid-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;}
+  .v-card{background:var(--panel);border:1px solid var(--line);border-radius:4px;overflow:hidden;cursor:pointer;transition:border-color .15s ease;}
+  .v-card:hover{border-color:var(--gold);}
+  .v-card img{width:100%;height:130px;object-fit:cover;display:block;background:var(--panel-2);}
+  .v-card .body{padding:12px;}
+  .v-card .name{font-family:'Oswald',sans-serif;font-weight:600;text-transform:uppercase;font-size:14px;}
+  .v-card .meta{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--khaki);margin-top:4px;}
+  .new-card{border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;min-height:190px;color:var(--khaki);font-family:'Oswald',sans-serif;text-transform:uppercase;font-size:13px;}
+  .new-card:hover{border-color:var(--gold);color:var(--gold);}
+
+  /* ---- Editor ---- */
+  .editor{display:grid;grid-template-columns:1fr 340px;gap:20px;}
+  @media(max-width:900px){.editor{grid-template-columns:1fr;}}
+  .field{display:flex;flex-direction:column;gap:4px;margin-bottom:14px;}
+  .field label{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--khaki);letter-spacing:0.06em;text-transform:uppercase;}
+  input[type=text]{background:var(--panel-2);border:1px solid var(--line);color:var(--parchment);padding:9px 10px;border-radius:3px;font-family:'Inter',sans-serif;font-size:13px;}
+  input[type=text]:focus{outline:none;border-color:var(--gold);}
+  input[type=file]{display:none;}
+
+  .canvas-wrap{position:relative;background:linear-gradient(180deg, var(--panel), var(--panel-2));border:1px solid var(--line);border-radius:4px;overflow:hidden;min-height:320px;display:flex;align-items:center;justify-content:center;}
+  .canvas-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(217,164,65,0.05) 1px, transparent 1px),linear-gradient(90deg, rgba(217,164,65,0.05) 1px, transparent 1px);background-size:28px 28px;pointer-events:none;}
+  .empty-state{position:relative;text-align:center;color:var(--khaki);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.7;max-width:280px;}
+  .img-stage{position:relative;max-width:100%;max-height:70vh;cursor:crosshair;user-select:none;}
+  .img-stage img{display:block;max-width:100%;max-height:70vh;pointer-events:none;}
+  .pin{position:absolute;width:26px;height:26px;transform:translate(-50%,-50%);cursor:grab;}
+  .pin .ring{position:absolute;inset:0;border-radius:50%;border:1px solid var(--gold);opacity:0;animation:pulse 2.6s ease-out infinite;}
+  .pin .dot{position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);border-radius:50%;background:var(--gold);color:var(--ink);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;box-shadow:0 0 0 4px rgba(217,164,65,0.18);}
+  .pin.active .dot{background:var(--rust);}
+  @keyframes pulse{0%{transform:scale(0.6);opacity:0.5;}100%{transform:scale(2.2);opacity:0;}}
+  .hint{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--khaki);margin-top:10px;}
+
+  .side{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:20px;display:flex;flex-direction:column;gap:16px;max-height:80vh;overflow-y:auto;}
+  .side h2{font-family:'Oswald',sans-serif;font-size:13px;text-transform:uppercase;letter-spacing:0.04em;margin:0;border-bottom:1px dashed var(--line);padding-bottom:8px;}
+  .pin-list{display:flex;flex-direction:column;gap:6px;}
+  .pin-row{display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid var(--line);border-radius:3px;cursor:pointer;background:var(--panel-2);}
+  .pin-row.active{border-color:var(--gold);}
+  .pin-row .num{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--khaki);width:16px;}
+  .pin-row .name{flex:1;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .pin-row .del{color:var(--khaki);font-size:13px;}
+  .pin-row .del:hover{color:var(--rust);}
+  .empty-note{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--khaki);}
+
+  .search-wrap{position:relative;}
+  .search-results{position:absolute;top:100%;left:0;right:0;background:var(--panel-2);border:1px solid var(--line);border-radius:3px;max-height:220px;overflow-y:auto;z-index:5;}
+  .search-item{display:flex;gap:8px;align-items:center;padding:8px;cursor:pointer;border-bottom:1px solid var(--line);}
+  .search-item:hover{background:var(--panel);}
+  .search-item img{width:32px;height:32px;object-fit:cover;border-radius:2px;background:var(--panel);flex:none;}
+  .search-item .t{font-size:12px;flex:1;}
+  .search-item .p{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--khaki);}
+
+  .picked-product{border:1px solid var(--ok);border-radius:3px;padding:10px;display:flex;gap:10px;align-items:center;margin-top:8px;}
+  .picked-product img{width:36px;height:36px;object-fit:cover;border-radius:2px;}
+  .picked-product .t{font-size:12.5px;flex:1;}
+  .picked-product .p{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ok);}
+
+  textarea{width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--parchment);padding:9px 10px;border-radius:3px;font-family:'Inter',sans-serif;font-size:13px;resize:vertical;min-height:56px;}
+  textarea:focus{outline:none;border-color:var(--gold);}
+
+  .embed-box{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--parchment-dim);background:var(--panel-2);border:1px solid var(--line);border-radius:3px;padding:10px;word-break:break-all;}
+</style>
+</head>
+<body>
+
+<div id="loginScreen">
+  <div class="login-box">
+    <div class="eyebrow">4x4 Factory SA</div>
+    <h1>Hotspot Admin</h1>
+    <p class="sub">Enter the admin password to continue.</p>
+    <input type="text" id="loginPassword" placeholder="Password" onkeydown="if(event.key==='Enter') doLogin()">
+    <button class="btn gold" style="width:100%;" onclick="doLogin()">Log in</button>
+    <div class="login-error" id="loginError"></div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+
+  <div class="topbar">
+    <div>
+      <div class="eyebrow">4x4 Factory SA · Internal Tool</div>
+      <h1>Hotspot Admin</h1>
+      <p class="sub">Vehicles with fitment hotspots linked to real products on the store.</p>
+    </div>
+    <button class="btn rust" onclick="doLogout()">Log out</button>
+  </div>
+
+  <!-- Vehicle list view -->
+  <div id="listView">
+    <div class="grid-list" id="vehicleGrid"></div>
+  </div>
+
+  <!-- Editor view -->
+  <div id="editorView" class="hidden">
+    <div class="topbar">
+      <div style="flex:1;">
+        <button class="btn" onclick="backToList()" style="margin-bottom:14px;">&larr; All vehicles</button>
+        <div class="field" style="max-width:360px;">
+          <label>Vehicle name</label>
+          <input type="text" id="vehicleName" placeholder="e.g. Next-Gen Ford Ranger">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn" id="refreshBtn" onclick="refreshFromShopify()">Refresh prices</button>
+        <button class="btn rust" id="deleteVehicleBtn" onclick="deleteVehicle()">Delete vehicle</button>
+        <button class="btn gold" onclick="saveVehicle()">Save</button>
+      </div>
+    </div>
+
+    <div class="editor">
+      <div>
+        <label class="btn gold" for="fileInput" style="display:inline-block;margin-bottom:12px;">Upload PNG</label>
+        <input type="file" id="fileInput" accept="image/png,image/jpeg">
+        <span id="uploadStatus" class="hint"></span>
+
+        <div class="canvas-wrap" id="canvasWrap">
+          <div class="canvas-grid"></div>
+          <div class="empty-state" id="emptyState">
+            <b style="display:block;color:var(--parchment-dim);font-size:16px;margin-bottom:6px;font-family:'Oswald',sans-serif;text-transform:uppercase;">No image yet</b>
+            Upload a PNG of the vehicle, then click on it to place a hotspot.
+          </div>
+        </div>
+        <div class="hint" id="hint" style="display:none;">Click the image to add a pin · drag a pin to reposition · click a pin to edit it</div>
+
+        <div style="margin-top:20px;">
+          <div class="embed-box" id="embedBox"></div>
+        </div>
+      </div>
+
+      <div class="side">
+        <div>
+          <h2>Hotspots (<span id="pinCount">0</span>)</h2>
+          <div class="pin-list" id="pinList" style="margin-top:10px;"></div>
+          <div class="empty-note" id="pinEmptyNote">No hotspots placed yet.</div>
+        </div>
+
+        <div id="editSection" class="hidden">
+          <h2>Edit hotspot</h2>
+          <div style="margin-top:10px;">
+            <div class="field">
+              <label>Label (short, on-hover title)</label>
+              <input type="text" id="f_label" placeholder="e.g. Roof">
+            </div>
+            <div class="field search-wrap">
+              <label>Shopify product</label>
+              <input type="text" id="f_search" placeholder="Search your store's products…" autocomplete="off">
+              <div class="search-results hidden" id="searchResults"></div>
+              <div id="pickedProduct"></div>
+            </div>
+            <div class="field">
+              <label>Short description (shown on click)</label>
+              <textarea id="f_desc" placeholder="One or two lines about fitment."></textarea>
+            </div>
+            <button class="btn rust" id="deletePinBtn" style="width:100%;">Delete this hotspot</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let session = false;
+let vehicles = [];
+let current = null; // {id, name, imageUrl, hotspots:[...]}
+let activePinId = null;
+let dragging = null;
+let pinCounter = 0;
+let searchDebounce = null;
+
+async function api(path, opts={}){
+  const res = await fetch(path, {
+    headers: {'Content-Type':'application/json'},
+    ...opts,
+  });
+  if(res.status === 401){ showLogin(); throw new Error('Not authenticated'); }
+  return res;
+}
+
+// ---- Auth ----
+async function checkSession(){
+  const res = await fetch('/api/admin/session');
+  const data = await res.json();
+  if(data.isAdmin){ showApp(); } else { showLogin(); }
+}
+function showLogin(){
+  document.getElementById('loginScreen').classList.remove('hidden');
+  document.getElementById('app').classList.add('hidden');
+}
+function showApp(){
+  document.getElementById('loginScreen').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  loadVehicles();
+}
+async function doLogin(){
+  const password = document.getElementById('loginPassword').value;
+  const res = await fetch('/api/admin/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password})});
+  if(res.ok){ showApp(); } else { document.getElementById('loginError').textContent = 'Wrong password.'; }
+}
+async function doLogout(){
+  await fetch('/api/admin/logout', {method:'POST'});
+  showLogin();
+}
+
+// ---- Vehicle list ----
+async function loadVehicles(){
+  const res = await api('/api/admin/vehicles');
+  vehicles = await res.json();
+  renderList();
+}
+function renderList(){
+  const grid = document.getElementById('vehicleGrid');
+  grid.innerHTML = '';
+  vehicles.forEach(v=>{
+    const card = document.createElement('div');
+    card.className = 'v-card';
+    card.innerHTML = `<img src="${v.image_url || ''}" onerror="this.style.display='none'">
+      <div class="body"><div class="name">${v.name}</div><div class="meta">${v.hotspots.length} hotspot${v.hotspots.length===1?'':'s'} · /${v.slug}</div></div>`;
+    card.onclick = ()=> openEditor(v);
+    grid.appendChild(card);
+  });
+  const newCard = document.createElement('div');
+  newCard.className = 'v-card new-card';
+  newCard.textContent = '+ New vehicle';
+  newCard.onclick = ()=> openEditor(null);
+  grid.appendChild(newCard);
+}
+
+function backToList(){
+  document.getElementById('editorView').classList.add('hidden');
+  document.getElementById('listView').classList.remove('hidden');
+  loadVehicles();
+}
+
+// ---- Editor ----
+function openEditor(v){
+  current = v ? {
+    id: v.id, name: v.name, imageUrl: v.image_url,
+    hotspots: v.hotspots.map(h=>({
+      id:h.id, x:h.x, y:h.y, label:h.label, desc:h.desc,
+      productId:h.product_id, productHandle:h.product_handle, productTitle:h.product_title,
+      productPrice:h.product_price, productImage:h.product_image, variantId:h.variant_id
+    }))
+  } : { id:null, name:'', imageUrl:null, hotspots:[] };
+  activePinId = null;
+  document.getElementById('vehicleName').value = current.name;
+  document.getElementById('deleteVehicleBtn').disabled = !current.id;
+  document.getElementById('refreshBtn').disabled = !current.id;
+  document.getElementById('listView').classList.add('hidden');
+  document.getElementById('editorView').classList.remove('hidden');
+  renderStage(); renderPinList(); renderEditor(); renderEmbedBox();
+}
+
+document.getElementById('vehicleName').addEventListener('input', e=>{ current.name = e.target.value; renderEmbedBox(); });
+
+document.getElementById('fileInput').addEventListener('change', async (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const status = document.getElementById('uploadStatus');
+  status.textContent = 'Uploading to Shopify…';
+  const fd = new FormData();
+  fd.append('image', file);
+  try{
+    const res = await fetch('/api/admin/upload-image', {method:'POST', body:fd});
+    const data = await res.json();
+    if(data.error) throw new Error(data.error);
+    current.imageUrl = data.url;
+    status.textContent = 'Uploaded.';
+    renderStage();
+  }catch(err){
+    status.textContent = 'Upload failed: ' + err.message;
+  }
+});
+
+function renderStage(){
+  const wrap = document.getElementById('canvasWrap');
+  wrap.querySelectorAll('.img-stage').forEach(n=>n.remove());
+  const empty = document.getElementById('emptyState');
+  const hint = document.getElementById('hint');
+  if(!current.imageUrl){
+    empty.style.display = 'block';
+    hint.style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  hint.style.display = 'block';
+
+  const stage = document.createElement('div');
+  stage.className = 'img-stage';
+  stage.id = 'imgStage';
+  const img = document.createElement('img');
+  img.src = current.imageUrl;
+  stage.appendChild(img);
+
+  current.hotspots.forEach((h,i)=>{
+    const pin = document.createElement('div');
+    pin.className = 'pin' + (h.id===activePinId ? ' active' : '');
+    pin.style.left = h.x + '%';
+    pin.style.top = h.y + '%';
+    pin.innerHTML = '<span class="ring"></span><span class="dot">' + (i+1) + '</span>';
+    pin.addEventListener('mousedown', (ev)=>{
+      ev.stopPropagation();
+      dragging = h.id; activePinId = h.id;
+      renderPinList(); renderEditor(); renderStage();
+    });
+    stage.appendChild(pin);
+  });
+
+  stage.addEventListener('click', (ev)=>{
+    if(ev.target.closest('.pin')) return;
+    const rect = stage.getBoundingClientRect();
+    const x = ((ev.clientX - rect.left)/rect.width)*100;
+    const y = ((ev.clientY - rect.top)/rect.height)*100;
+    pinCounter++;
+    const h = {id:'new'+Date.now()+pinCounter, x:+x.toFixed(2), y:+y.toFixed(2), label:'', desc:'',
+      productId:null, productHandle:null, productTitle:null, productPrice:null, productImage:null, variantId:null};
+    current.hotspots.push(h);
+    activePinId = h.id;
+    renderStage(); renderPinList(); renderEditor();
+  });
+
+  wrap.appendChild(stage);
+}
+
+document.addEventListener('mousemove', (ev)=>{
+  if(!dragging) return;
+  const stage = document.getElementById('imgStage');
+  if(!stage) return;
+  const rect = stage.getBoundingClientRect();
+  let x = ((ev.clientX-rect.left)/rect.width)*100;
+  let y = ((ev.clientY-rect.top)/rect.height)*100;
+  x = Math.max(0, Math.min(100,x)); y = Math.max(0, Math.min(100,y));
+  const h = current.hotspots.find(h=>h.id===dragging);
+  if(h){ h.x = +x.toFixed(2); h.y = +y.toFixed(2); renderStage(); }
+});
+document.addEventListener('mouseup', ()=>{ dragging = null; });
+
+function renderPinList(){
+  const list = document.getElementById('pinList');
+  list.innerHTML = '';
+  document.getElementById('pinCount').textContent = current.hotspots.length;
+  document.getElementById('pinEmptyNote').style.display = current.hotspots.length ? 'none' : 'block';
+  current.hotspots.forEach((h,i)=>{
+    const row = document.createElement('div');
+    row.className = 'pin-row' + (h.id===activePinId?' active':'');
+    row.innerHTML = `<span class="num">${String(i+1).padStart(2,'0')}</span><span class="name">${h.productTitle || 'Untitled'}</span><span class="del">✕</span>`;
+    row.querySelector('.name').onclick = ()=>{ activePinId = h.id; renderPinList(); renderEditor(); renderStage(); };
+    row.querySelector('.num').onclick = ()=>{ activePinId = h.id; renderPinList(); renderEditor(); renderStage(); };
+    row.querySelector('.del').onclick = (e)=>{
+      e.stopPropagation();
+      current.hotspots = current.hotspots.filter(x=>x.id!==h.id);
+      if(activePinId===h.id) activePinId=null;
+      renderPinList(); renderEditor(); renderStage();
+    };
+    list.appendChild(row);
+  });
+}
+
+function renderEditor(){
+  const h = current.hotspots.find(h=>h.id===activePinId);
+  const section = document.getElementById('editSection');
+  if(!h){ section.classList.add('hidden'); return; }
+  section.classList.remove('hidden');
+  document.getElementById('f_label').value = h.label || '';
+  document.getElementById('f_desc').value = h.desc || '';
+  document.getElementById('f_search').value = '';
+  document.getElementById('searchResults').classList.add('hidden');
+  renderPickedProduct(h);
+}
+
+function renderPickedProduct(h){
+  const el = document.getElementById('pickedProduct');
+  if(!h.productTitle){ el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="picked-product">
+    <img src="${h.productImage||''}" onerror="this.style.display='none'">
+    <div class="t">${h.productTitle}</div>
+    <div class="p">R ${Number(h.productPrice||0).toLocaleString('en-ZA')}</div>
+  </div>`;
+}
+
+document.getElementById('f_label').addEventListener('input', e=>{
+  const h = current.hotspots.find(h=>h.id===activePinId); if(!h) return;
+  h.label = e.target.value; renderPinList();
+});
+document.getElementById('f_desc').addEventListener('input', e=>{
+  const h = current.hotspots.find(h=>h.id===activePinId); if(!h) return;
+  h.desc = e.target.value;
+});
+document.getElementById('deletePinBtn').addEventListener('click', ()=>{
+  current.hotspots = current.hotspots.filter(h=>h.id!==activePinId);
+  activePinId = null;
+  renderPinList(); renderEditor(); renderStage();
+});
+
+document.getElementById('f_search').addEventListener('input', (e)=>{
+  clearTimeout(searchDebounce);
+  const q = e.target.value.trim();
+  const box = document.getElementById('searchResults');
+  if(!q){ box.classList.add('hidden'); return; }
+  searchDebounce = setTimeout(async ()=>{
+    const res = await api('/api/admin/shopify/search-products?q=' + encodeURIComponent(q));
+    const results = await res.json();
+    box.innerHTML = '';
+    if(!results.length){
+      box.innerHTML = '<div class="search-item" style="cursor:default;">No matches</div>';
+    }
+    results.forEach(p=>{
+      const item = document.createElement('div');
+      item.className = 'search-item';
+      item.innerHTML = `<img src="${p.image||''}" onerror="this.style.display='none'"><div class="t">${p.title}</div><div class="p">R ${Number(p.price||0).toLocaleString('en-ZA')}</div>`;
+      item.onclick = ()=>{
+        const h = current.hotspots.find(h=>h.id===activePinId); if(!h) return;
+        h.productId = p.productId; h.productHandle = p.handle; h.productTitle = p.title;
+        h.productPrice = p.price; h.productImage = p.image; h.variantId = p.variantId;
+        box.classList.add('hidden');
+        document.getElementById('f_search').value = '';
+        renderPickedProduct(h); renderPinList();
+      };
+      box.appendChild(item);
+    });
+    box.classList.remove('hidden');
+  }, 300);
+});
+
+function renderEmbedBox(){
+  const box = document.getElementById('embedBox');
+  if(!current.id){
+    box.textContent = 'Save this vehicle to get its embed snippet.';
+    return;
+  }
+  const slug = (current.name||'vehicle').toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
+  box.textContent = '<div data-fxf-hotspot="' + slug + '"></div>\\n<script src="' + location.origin + '/embed.js"><\\/script>';
+}
+
+async function saveVehicle(){
+  if(!current.name){ alert('Give the vehicle a name first.'); return; }
+  if(!current.imageUrl){ alert('Upload an image first.'); return; }
+  const res = await api('/api/admin/vehicles', {
+    method:'POST',
+    body: JSON.stringify({ id: current.id, name: current.name, imageUrl: current.imageUrl, hotspots: current.hotspots })
+  });
+  const data = await res.json();
+  if(data.error){ alert('Save failed: ' + data.error); return; }
+  current.id = data.id;
+  document.getElementById('deleteVehicleBtn').disabled = false;
+  document.getElementById('refreshBtn').disabled = false;
+  renderEmbedBox();
+  alert('Saved.');
+}
+
+async function deleteVehicle(){
+  if(!current.id) return;
+  if(!confirm('Delete this vehicle and all its hotspots? This can\\'t be undone.')) return;
+  await api('/api/admin/vehicles/' + current.id, {method:'DELETE'});
+  backToList();
+}
+
+async function refreshFromShopify(){
+  if(!current.id) return;
+  await api('/api/admin/vehicles/' + current.id + '/refresh', {method:'POST'});
+  const res = await api('/api/admin/vehicles/' + current.id);
+  const v = await res.json();
+  openEditor(v);
+  alert('Refreshed from Shopify.');
+}
+
+checkSession();
+</script>
+</body>
+</html>

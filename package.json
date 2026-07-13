@@ -1,0 +1,19 @@
+{
+  "name": "4x4factory-hotspot-app",
+  "version": "1.0.0",
+  "description": "Vehicle hotspot builder + Shopify product embed for 4x4 Factory SA",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "cookie-session": "^2.1.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
