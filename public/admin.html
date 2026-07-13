@@ -235,8 +235,19 @@ function showApp(){
 }
 async function doLogin(){
   const password = document.getElementById('loginPassword').value;
-  const res = await fetch('/api/admin/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password})});
-  if(res.ok){ showApp(); } else { document.getElementById('loginError').textContent = 'Wrong password.'; }
+  const errEl = document.getElementById('loginError');
+  errEl.textContent = 'Logging in…';
+  try{
+    const res = await fetch('/api/admin/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password})});
+    if(res.ok){ errEl.textContent = ''; showApp(); }
+    else {
+      const data = await res.json().catch(()=>({}));
+      errEl.textContent = data.error || ('Login failed (status ' + res.status + ')');
+    }
+  }catch(err){
+    console.error(err);
+    errEl.textContent = 'Network error: ' + err.message;
+  }
 }
 async function doLogout(){
   await fetch('/api/admin/logout', {method:'POST'});
@@ -470,7 +481,7 @@ function renderEmbedBox(){
     return;
   }
   const slug = (current.name||'vehicle').toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
-  box.textContent = '<div data-fxf-hotspot="' + slug + '"></div>\\n<script src="' + location.origin + '/embed.js"><\\/script>';
+  box.textContent = '<div data-fxf-hotspot="' + slug + '"></div>\n<script src="' + location.origin + '/embed.js"><\/script>';
 }
 
 async function saveVehicle(){
@@ -491,7 +502,7 @@ async function saveVehicle(){
 
 async function deleteVehicle(){
   if(!current.id) return;
-  if(!confirm('Delete this vehicle and all its hotspots? This can\\'t be undone.')) return;
+  if(!confirm('Delete this vehicle and all its hotspots? This cannot be undone.')) return;
   await api('/api/admin/vehicles/' + current.id, {method:'DELETE'});
   backToList();
 }
