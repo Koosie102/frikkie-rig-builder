@@ -115,6 +115,11 @@
 
   <!-- Vehicle list view -->
   <div id="listView">
+    <div style="margin-bottom:18px;">
+      <h2 style="font-family:'Oswald',sans-serif;font-size:13px;text-transform:uppercase;letter-spacing:0.04em;margin:0 0 8px;">Make/Model picker embed (one, reused everywhere)</h2>
+      <div class="embed-box" id="pickerEmbedBox"></div>
+      <p class="sub" style="margin-top:8px;">Paste this once on your "Build Your Rig" page. It shows Make/Year/Model/Submodel dropdowns and reveals the matching vehicle's hotspot diagram inline once a customer narrows it down — reads Make/Model/Submodel/Year from every vehicle below, so nothing else to configure here.</p>
+    </div>
     <div class="grid-list" id="vehicleGrid"></div>
   </div>
 
@@ -124,8 +129,30 @@
       <div style="flex:1;">
         <button class="btn" onclick="backToList()" style="margin-bottom:14px;">&larr; All vehicles</button>
         <div class="field" style="max-width:360px;">
-          <label>Vehicle name</label>
+          <label>Vehicle name (display label)</label>
           <input type="text" id="vehicleName" placeholder="e.g. Next-Gen Ford Ranger">
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;max-width:620px;">
+          <div class="field">
+            <label>Make</label>
+            <input type="text" id="vehicleMake" placeholder="Toyota">
+          </div>
+          <div class="field">
+            <label>Model</label>
+            <input type="text" id="vehicleModel" placeholder="Hilux">
+          </div>
+          <div class="field">
+            <label>Submodel</label>
+            <input type="text" id="vehicleSubmodel" placeholder="N90 Double Cab">
+          </div>
+          <div class="field">
+            <label>Year from</label>
+            <input type="text" id="vehicleYearFrom" placeholder="2024">
+          </div>
+          <div class="field">
+            <label>Year to (blank = current)</label>
+            <input type="text" id="vehicleYearTo" placeholder="">
+          </div>
         </div>
       </div>
       <div style="display:flex;gap:8px;">
@@ -209,6 +236,8 @@ async function loadVehicles(){
   const res = await api('/api/admin/vehicles');
   vehicles = await res.json();
   renderList();
+  document.getElementById('pickerEmbedBox').textContent =
+    '<div data-fxf-picker></div>\n<script src="' + location.origin + '/embed.js"><\/script>';
 }
 function renderList(){
   const grid = document.getElementById('vehicleGrid');
@@ -216,8 +245,10 @@ function renderList(){
   vehicles.forEach(v=>{
     const card = document.createElement('div');
     card.className = 'v-card';
+    const years = v.year_from ? (v.year_from + (v.year_to ? ('–' + v.year_to) : '+')) : '';
+    const tax = [v.make, v.model, v.submodel, years].filter(Boolean).join(' · ');
     card.innerHTML = `<img src="${v.image_url || ''}" onerror="this.style.display='none'">
-      <div class="body"><div class="name">${v.name}</div><div class="meta">${v.hotspots.length} hotspot${v.hotspots.length===1?'':'s'} · /${v.slug}</div></div>`;
+      <div class="body"><div class="name">${v.name}</div><div class="meta">${tax ? tax + ' · ' : ''}${v.hotspots.length} hotspot${v.hotspots.length===1?'':'s'}</div></div>`;
     card.onclick = ()=> openEditor(v);
     grid.appendChild(card);
   });
@@ -237,15 +268,22 @@ function backToList(){
 // ---- Editor ----
 function openEditor(v){
   current = v ? {
-    id: v.id, name: v.name, imageUrl: v.image_url,
+    id: v.id, name: v.name, imageUrl: v.image_url, slug: v.slug,
+    make: v.make || '', model: v.model || '', submodel: v.submodel || '',
+    yearFrom: v.year_from || '', yearTo: v.year_to || '',
     hotspots: v.hotspots.map(h=>({
       id:h.id, x:h.x, y:h.y, label:h.label, desc:h.desc,
       productId:h.product_id, productHandle:h.product_handle, productTitle:h.product_title,
       productPrice:h.product_price, productImage:h.product_image, variantId:h.variant_id
     }))
-  } : { id:null, name:'', imageUrl:null, hotspots:[] };
+  } : { id:null, name:'', imageUrl:null, slug:null, make:'', model:'', submodel:'', yearFrom:'', yearTo:'', hotspots:[] };
   activePinId = null;
   document.getElementById('vehicleName').value = current.name;
+  document.getElementById('vehicleMake').value = current.make;
+  document.getElementById('vehicleModel').value = current.model;
+  document.getElementById('vehicleSubmodel').value = current.submodel;
+  document.getElementById('vehicleYearFrom').value = current.yearFrom;
+  document.getElementById('vehicleYearTo').value = current.yearTo;
   document.getElementById('deleteVehicleBtn').disabled = !current.id;
   document.getElementById('refreshBtn').disabled = !current.id;
   document.getElementById('listView').classList.add('hidden');
@@ -254,6 +292,11 @@ function openEditor(v){
 }
 
 document.getElementById('vehicleName').addEventListener('input', e=>{ current.name = e.target.value; renderEmbedBox(); });
+document.getElementById('vehicleMake').addEventListener('input', e=>{ current.make = e.target.value; });
+document.getElementById('vehicleModel').addEventListener('input', e=>{ current.model = e.target.value; });
+document.getElementById('vehicleSubmodel').addEventListener('input', e=>{ current.submodel = e.target.value; });
+document.getElementById('vehicleYearFrom').addEventListener('input', e=>{ current.yearFrom = e.target.value; });
+document.getElementById('vehicleYearTo').addEventListener('input', e=>{ current.yearTo = e.target.value; });
 
 document.getElementById('fileInput').addEventListener('change', async (e)=>{
   const file = e.target.files[0];
@@ -426,12 +469,11 @@ document.getElementById('f_search').addEventListener('input', (e)=>{
 
 function renderEmbedBox(){
   const box = document.getElementById('embedBox');
-  if(!current.id){
+  if(!current.id || !current.slug){
     box.textContent = 'Save this vehicle to get its embed snippet.';
     return;
   }
-  const slug = (current.name||'vehicle').toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
-  box.textContent = '<div data-fxf-hotspot="' + slug + '"></div>\n<script src="' + location.origin + '/embed.js"><\/script>';
+  box.textContent = '<div data-fxf-hotspot="' + current.slug + '"></div>\n<script src="' + location.origin + '/embed.js"><\/script>';
 }
 
 async function saveVehicle(){
@@ -439,11 +481,17 @@ async function saveVehicle(){
   if(!current.imageUrl){ alert('Upload an image first.'); return; }
   const res = await api('/api/admin/vehicles', {
     method:'POST',
-    body: JSON.stringify({ id: current.id, name: current.name, imageUrl: current.imageUrl, hotspots: current.hotspots })
+    body: JSON.stringify({
+      id: current.id, name: current.name, imageUrl: current.imageUrl, hotspots: current.hotspots,
+      make: current.make, model: current.model, submodel: current.submodel,
+      yearFrom: current.yearFrom ? parseInt(current.yearFrom,10) : null,
+      yearTo: current.yearTo ? parseInt(current.yearTo,10) : null,
+    })
   });
   const data = await res.json();
   if(data.error){ alert('Save failed: ' + data.error); return; }
   current.id = data.id;
+  current.slug = data.slug;
   document.getElementById('deleteVehicleBtn').disabled = false;
   document.getElementById('refreshBtn').disabled = false;
   renderEmbedBox();

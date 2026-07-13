@@ -48,6 +48,20 @@ db.exec(`
   );
 `);
 
+// Safe migration: add taxonomy columns to vehicles if this DB predates them
+// (so it doesn't break on an already-deployed volume with existing data).
+{
+  const cols = db.prepare("PRAGMA table_info(vehicles)").all().map((c) => c.name);
+  const addCol = (name, def) => {
+    if (!cols.includes(name)) db.exec(`ALTER TABLE vehicles ADD COLUMN ${name} ${def}`);
+  };
+  addCol('make', 'TEXT');
+  addCol('model', 'TEXT');
+  addCol('submodel', 'TEXT');
+  addCol('year_from', 'INTEGER');
+  addCol('year_to', 'INTEGER');
+}
+
 const slugify = (s) =>
   s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'vehicle';
 const newId = () => crypto.randomBytes(8).toString('hex');
@@ -242,9 +256,13 @@ app.get('/api/admin/vehicles/:id', (req, res) => {
 });
 
 // Create or update a vehicle + its full hotspot list in one call.
-// Body: { id?, name, imageUrl, hotspots: [{x,y,label,desc,productId,productHandle,productTitle,productPrice,productImage,variantId}] }
+// Body: { id?, name, imageUrl, make, model, submodel, yearFrom, yearTo,
+//         hotspots: [{x,y,label,desc,productId,productHandle,productTitle,productPrice,productImage,variantId}] }
 app.post('/api/admin/vehicles', (req, res) => {
-  const { id, name, imageUrl, hotspots = [] } = req.body || {};
+  const {
+    id, name, imageUrl, hotspots = [],
+    make = '', model = '', submodel = '', yearFrom = null, yearTo = null,
+  } = req.body || {};
   if (!name || !imageUrl) return res.status(400).json({ error: 'name and imageUrl are required' });
 
   const vehicleId = id || newId();
@@ -256,10 +274,12 @@ app.post('/api/admin/vehicles', (req, res) => {
   while (slugTaken(slug)) slug = `${baseSlug}-${n++}`;
 
   const upsertVehicle = db.prepare(`
-    INSERT INTO vehicles (id, slug, name, image_url, updated_at)
-    VALUES (@id, @slug, @name, @imageUrl, datetime('now'))
+    INSERT INTO vehicles (id, slug, name, image_url, make, model, submodel, year_from, year_to, updated_at)
+    VALUES (@id, @slug, @name, @imageUrl, @make, @model, @submodel, @yearFrom, @yearTo, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       slug = excluded.slug, name = excluded.name, image_url = excluded.image_url,
+      make = excluded.make, model = excluded.model, submodel = excluded.submodel,
+      year_from = excluded.year_from, year_to = excluded.year_to,
       updated_at = datetime('now')
   `);
   const clearHotspots = db.prepare('DELETE FROM hotspots WHERE vehicle_id = ?');
@@ -271,7 +291,11 @@ app.post('/api/admin/vehicles', (req, res) => {
   `);
 
   const tx = db.transaction(() => {
-    upsertVehicle.run({ id: vehicleId, slug, name, imageUrl });
+    upsertVehicle.run({
+      id: vehicleId, slug, name, imageUrl,
+      make, model, submodel,
+      yearFrom: yearFrom || null, yearTo: yearTo || null,
+    });
     clearHotspots.run(vehicleId);
     hotspots.forEach((h, i) => {
       insertHotspot.run({
@@ -344,6 +368,27 @@ app.post('/api/admin/vehicles/:id/refresh', async (req, res) => {
 // ---------------------------------------------------------------------------
 // Public API — consumed by the storefront embed script
 // ---------------------------------------------------------------------------
+// Lightweight list for the Make/Year/Model/Submodel picker — no hotspot data,
+// so it stays small even with a lot of vehicles.
+app.get('/api/vehicles-public', (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  const rows = db
+    .prepare('SELECT slug, name, image_url, make, model, submodel, year_from, year_to FROM vehicles ORDER BY make, model, submodel')
+    .all();
+  res.json(
+    rows.map((v) => ({
+      slug: v.slug,
+      name: v.name,
+      image: v.image_url,
+      make: v.make || '',
+      model: v.model || '',
+      submodel: v.submodel || '',
+      yearFrom: v.year_from,
+      yearTo: v.year_to,
+    }))
+  );
+});
+
 // This runs on a different domain to the Shopify page that calls it, so it
 // needs CORS allowed explicitly or the browser blocks the fetch silently.
 app.get('/api/vehicles/:slug', (req, res) => {
@@ -456,6 +501,124 @@ app.get('/embed.js', (req, res) => {
     });
   }
 
+  function renderPicker(root, list){
+    var uid = 'fxfp' + Math.random().toString(36).slice(2,9);
+    var state = { make:'', year:'', model:'', submodel:'' };
+    var CURRENT_YEAR = new Date().getFullYear();
+    var CAP_YEAR = CURRENT_YEAR + 1;
+    var selStyle = 'padding:11px 10px;border-radius:3px;border:1px solid #3a3428;background:#1c1914;color:#ece4d3;font-size:13px;width:100%;';
+
+    root.innerHTML =
+      '<div style="max-width:640px;margin:0 auto;font-family:inherit;">' +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;">' +
+          '<select class="' + uid + '-make" style="' + selStyle + '"></select>' +
+          '<select class="' + uid + '-year" style="' + selStyle + '" disabled></select>' +
+          '<select class="' + uid + '-model" style="' + selStyle + '" disabled></select>' +
+          '<select class="' + uid + '-submodel" style="' + selStyle + '" disabled></select>' +
+        '</div>' +
+        '<div class="' + uid + '-result" style="margin-top:18px;"></div>' +
+      '</div>';
+
+    var makeSel = root.querySelector('.' + uid + '-make');
+    var yearSel = root.querySelector('.' + uid + '-year');
+    var modelSel = root.querySelector('.' + uid + '-model');
+    var subSel = root.querySelector('.' + uid + '-submodel');
+    var resultEl = root.querySelector('.' + uid + '-result');
+
+    function uniq(arr){ return arr.filter(function(v,i){ return arr.indexOf(v) === i; }); }
+    function fillSelect(sel, values, placeholder){
+      sel.innerHTML = '<option value="">' + placeholder + '</option>' +
+        values.map(function(v){ return '<option value="' + v + '">' + v + '</option>'; }).join('');
+    }
+    function matches(v, upTo){
+      if(state.make && v.make !== state.make) return false;
+      if(upTo === 'year') return true;
+      if(state.year){
+        var y = parseInt(state.year, 10);
+        var lo = v.yearFrom || 0, hi = v.yearTo || CAP_YEAR;
+        if(y < lo || y > hi) return false;
+      }
+      if(upTo === 'model') return true;
+      if(state.model && v.model !== state.model) return false;
+      if(upTo === 'submodel') return true;
+      if(state.submodel && v.submodel !== state.submodel) return false;
+      return true;
+    }
+
+    function showResult(){
+      var found = list.filter(function(v){ return matches(v,'done'); });
+      if(found.length === 1){
+        var diagramRoot = document.createElement('div');
+        resultEl.innerHTML = '';
+        resultEl.appendChild(diagramRoot);
+        fetch(API_BASE + '/api/vehicles/' + encodeURIComponent(found[0].slug))
+          .then(function(r){ return r.json(); })
+          .then(function(data){ render(diagramRoot, data); })
+          .catch(function(err){ console.error('Hotspot widget failed to load:', err); });
+      } else if(found.length > 1){
+        resultEl.innerHTML = '<div style="color:#a89f8c;font-size:13px;padding:12px 0;">Narrow it down further above to see fitment.</div>';
+      } else {
+        resultEl.innerHTML = '';
+      }
+    }
+
+    function refresh(){
+      fillSelect(makeSel, uniq(list.map(function(v){ return v.make; })).filter(Boolean).sort(), 'Make');
+      makeSel.value = state.make;
+
+      if(!state.make){
+        yearSel.disabled = modelSel.disabled = subSel.disabled = true;
+        yearSel.innerHTML = modelSel.innerHTML = subSel.innerHTML = '';
+        resultEl.innerHTML = '';
+        return;
+      }
+      var years = [];
+      list.filter(function(v){ return matches(v,'year'); }).forEach(function(v){
+        var lo = v.yearFrom || CURRENT_YEAR, hi = v.yearTo || CAP_YEAR;
+        for(var y=lo; y<=hi; y++) years.push(y);
+      });
+      fillSelect(yearSel, uniq(years).sort(function(a,b){return b-a;}), 'Year');
+      yearSel.value = state.year;
+      yearSel.disabled = false;
+
+      if(!state.year){
+        modelSel.disabled = subSel.disabled = true;
+        modelSel.innerHTML = subSel.innerHTML = '';
+        resultEl.innerHTML = '';
+        return;
+      }
+      var models = uniq(list.filter(function(v){ return matches(v,'model'); }).map(function(v){ return v.model; })).filter(Boolean).sort();
+      fillSelect(modelSel, models, 'Model');
+      modelSel.value = state.model;
+      modelSel.disabled = false;
+
+      if(!state.model){
+        subSel.disabled = true;
+        subSel.innerHTML = '';
+        resultEl.innerHTML = '';
+        return;
+      }
+      var subs = uniq(list.filter(function(v){ return matches(v,'submodel'); }).map(function(v){ return v.submodel; })).filter(Boolean).sort();
+      if(subs.length === 0){
+        subSel.disabled = true;
+        subSel.innerHTML = '';
+        showResult();
+        return;
+      }
+      fillSelect(subSel, subs, 'Submodel');
+      subSel.value = state.submodel;
+      subSel.disabled = false;
+      showResult();
+    }
+
+    makeSel.addEventListener('change', function(){ state.make = makeSel.value; state.year=''; state.model=''; state.submodel=''; refresh(); });
+    yearSel.addEventListener('change', function(){ state.year = yearSel.value; state.model=''; state.submodel=''; refresh(); });
+    modelSel.addEventListener('change', function(){ state.model = modelSel.value; state.submodel=''; refresh(); });
+    subSel.addEventListener('change', function(){ state.submodel = subSel.value; refresh(); });
+
+    refresh();
+  }
+
   document.querySelectorAll('[data-fxf-hotspot]').forEach(function(root){
     var slug = root.getAttribute('data-fxf-hotspot');
     fetch(API_BASE + '/api/vehicles/' + encodeURIComponent(slug))
@@ -468,6 +631,13 @@ app.get('/embed.js', (req, res) => {
         render(root, data);
       })
       .catch(function(err){ console.error('Hotspot widget failed to load:', err); });
+  });
+
+  document.querySelectorAll('[data-fxf-picker]').forEach(function(root){
+    fetch(API_BASE + '/api/vehicles-public')
+      .then(function(r){ return r.json(); })
+      .then(function(list){ renderPicker(root, list); })
+      .catch(function(err){ console.error('Hotspot picker failed to load:', err); });
   });
 })();
 `);
