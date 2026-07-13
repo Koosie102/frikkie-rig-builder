@@ -13,6 +13,7 @@ const {
   SHOPIFY_CLIENT_SECRET,
   SHOPIFY_API_VERSION = '2025-01',
   STOREFRONT_URL = '',
+  STORE_LOGO_URL = '',
   DATABASE_PATH = './data/hotspots.db',
 } = process.env;
 
@@ -155,20 +156,47 @@ async function searchShopifyProducts(q) {
             title
             handle
             featuredImage { url }
-            variants(first: 1) { edges { node { id price } } }
+            variants(first: 25) { edges { node { id title price } } }
           }
         }
       }
     }`,
     { q: q ? `title:*${q}*` : '' }
   );
-  return data.products.edges.map(({ node }) => ({
-    productId: node.id,
-    title: node.title,
-    handle: node.handle,
-    image: node.featuredImage ? node.featuredImage.url : null,
-    variantId: node.variants.edges[0] ? node.variants.edges[0].node.id : null,
-    price: node.variants.edges[0] ? node.variants.edges[0].node.price : null,
+  return data.products.edges.map(({ node }) => {
+    const variants = node.variants.edges.map(({ node: v }) => ({
+      variantId: v.id,
+      title: v.title,
+      price: v.price,
+    }));
+    return {
+      productId: node.id,
+      title: node.title,
+      handle: node.handle,
+      image: node.featuredImage ? node.featuredImage.url : null,
+      variantId: variants[0] ? variants[0].variantId : null,
+      price: variants[0] ? variants[0].price : null,
+      variants,
+    };
+  });
+}
+
+// Look up a single product's variants (used when the admin wants to switch
+// which variant a hotspot points at, after already picking a product).
+async function getProductVariants(productId) {
+  const data = await shopifyGraphQL(
+    `query($id: ID!) {
+      product(id: $id) {
+        variants(first: 100) { edges { node { id title price } } }
+      }
+    }`,
+    { id: productId }
+  );
+  if (!data.product) return [];
+  return data.product.variants.edges.map(({ node: v }) => ({
+    variantId: v.id,
+    title: v.title,
+    price: v.price,
   }));
 }
 
@@ -289,6 +317,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
+app.get('/api/admin/config', (req, res) => {
+  res.json({ logoUrl: STORE_LOGO_URL || null });
+});
+
 // ---------------------------------------------------------------------------
 // Shopify product search + image upload
 // ---------------------------------------------------------------------------
@@ -305,6 +337,17 @@ app.get('/api/admin/shopify/search-products', async (req, res) => {
 app.get('/api/admin/shopify/search-collections', async (req, res) => {
   try {
     const results = await searchShopifyCollections(req.query.q || '');
+    res.json(results);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/shopify/product-variants', async (req, res) => {
+  try {
+    if (!req.query.id) return res.status(400).json({ error: 'id is required' });
+    const results = await getProductVariants(req.query.id);
     res.json(results);
   } catch (err) {
     console.error(err);
@@ -646,7 +689,8 @@ app.get('/embed.js', (req, res) => {
         '</div>' +
         '<div class="' + uid + '-panel" style="display:none;margin-top:14px;border:1px solid #3a3428;background:#1c1914;color:#ece4d3;border-radius:4px;padding:16px;">' +
           '<div class="' + uid + '-single">' +
-            '<div style="display:flex;gap:14px;align-items:flex-start;">' +
+            '<div style="display:flex;gap:12px;align-items:flex-start;">' +
+              '<input type="checkbox" class="' + uid + '-singleCheck" style="margin-top:6px;width:16px;height:16px;flex:none;cursor:pointer;">' +
               '<img class="' + uid + '-img" style="width:64px;height:64px;object-fit:cover;border-radius:3px;flex:none;">' +
               '<div style="flex:1;min-width:0;">' +
                 '<div class="' + uid + '-title" style="font-size:16px;font-weight:700;margin-bottom:4px;"></div>' +
@@ -666,6 +710,10 @@ app.get('/embed.js', (req, res) => {
             '<div class="' + uid + '-optionsDesc" style="font-size:13px;color:#a89f8c;line-height:1.5;margin-bottom:10px;"></div>' +
             '<div class="' + uid + '-optionsList" style="display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;"></div>' +
           '</div>' +
+        '</div>' +
+        '<div class="' + uid + '-bulkbar" style="display:none;position:sticky;bottom:12px;margin-top:14px;background:#d9a441;color:#151310;border-radius:4px;padding:12px 16px;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">' +
+          '<div class="' + uid + '-bulkCount" style="font-size:13px;font-weight:700;"></div>' +
+          '<button class="' + uid + '-bulkAdd" style="background:#151310;color:#ece4d3;border:none;font-weight:700;padding:10px 16px;border-radius:3px;font-size:12.5px;cursor:pointer;">Add selected to cart</button>' +
         '</div>' +
       '</div>' +
       '<style>' +
@@ -689,7 +737,48 @@ app.get('/embed.js', (req, res) => {
     var imgEl = root.querySelector('.' + uid + '-img');
     var linkEl = root.querySelector('.' + uid + '-link');
     var addBtn = root.querySelector('.' + uid + '-add');
+    var singleCheck = root.querySelector('.' + uid + '-singleCheck');
+    var bulkBar = root.querySelector('.' + uid + '-bulkbar');
+    var bulkCount = root.querySelector('.' + uid + '-bulkCount');
+    var bulkAddBtn = root.querySelector('.' + uid + '-bulkAdd');
     var activePin = null, activeData = null;
+    var selected = {}; // variantId -> { variantId, title, price }
+
+    function updateBulkBar(){
+      var ids = Object.keys(selected);
+      if(ids.length === 0){ bulkBar.style.display = 'none'; return; }
+      var total = ids.reduce(function(sum, id){ return sum + (Number(selected[id].price) || 0); }, 0);
+      bulkBar.style.display = 'flex';
+      bulkCount.textContent = ids.length + ' item' + (ids.length===1?'':'s') + ' selected — ' + fmtZAR(total);
+    }
+
+    function toggleSelected(variantId, title, price, checked){
+      if(!variantId) return;
+      if(checked){ selected[variantId] = { variantId:variantId, title:title, price:price }; }
+      else { delete selected[variantId]; }
+      updateBulkBar();
+    }
+
+    bulkAddBtn.addEventListener('click', function(){
+      var items = Object.keys(selected).map(function(id){
+        return { id: id.split('/').pop(), quantity: 1 };
+      });
+      if(!items.length) return;
+      var original = bulkAddBtn.textContent;
+      fetch('/cart/add.js', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ items: items })
+      }).then(function(r){
+        if(r.ok){
+          bulkAddBtn.textContent = 'Added!';
+          selected = {};
+          root.querySelectorAll('input[type=checkbox]').forEach(function(cb){ cb.checked = false; });
+          updateBulkBar();
+          setTimeout(function(){ bulkAddBtn.textContent = original; }, 1500);
+        } else { bulkAddBtn.textContent = 'Try again'; }
+      }).catch(function(){ bulkAddBtn.textContent = 'Try again'; });
+    });
 
     data.hotspots.forEach(function(h){
       var el = document.createElement('div');
@@ -713,6 +802,11 @@ app.get('/embed.js', (req, res) => {
           (h.products || []).forEach(function(p){
             var row = document.createElement('div');
             row.style.cssText = 'display:flex;gap:10px;align-items:center;border:1px solid #3a3428;border-radius:3px;padding:8px;';
+            var check = document.createElement('input');
+            check.type = 'checkbox';
+            check.style.cssText = 'width:16px;height:16px;flex:none;cursor:pointer;';
+            check.checked = !!selected[p.variantId];
+            check.addEventListener('change', function(){ toggleSelected(p.variantId, p.title, p.price, check.checked); });
             var img = document.createElement('img');
             img.src = p.image || '';
             img.style.cssText = 'width:44px;height:44px;object-fit:cover;border-radius:2px;flex:none;';
@@ -729,7 +823,7 @@ app.get('/embed.js', (req, res) => {
             viewLink.textContent = 'View';
             viewLink.href = p.url || '#';
             viewLink.style.cssText = 'border:1px solid #6b6748;color:#ece4d3;text-decoration:none;font-weight:700;padding:7px 10px;border-radius:3px;font-size:11.5px;flex:none;';
-            row.appendChild(img); row.appendChild(mid); row.appendChild(addRowBtn); row.appendChild(viewLink);
+            row.appendChild(check); row.appendChild(img); row.appendChild(mid); row.appendChild(addRowBtn); row.appendChild(viewLink);
             optionsList.appendChild(row);
           });
         } else {
@@ -741,6 +835,8 @@ app.get('/embed.js', (req, res) => {
           imgEl.src = h.image || '';
           imgEl.style.display = h.image ? 'block' : 'none';
           linkEl.href = h.url || '#';
+          singleCheck.checked = !!selected[h.variantId];
+          singleCheck.onchange = function(){ toggleSelected(h.variantId, h.title, h.price, singleCheck.checked); };
         }
       });
       pinLayer.appendChild(el);
@@ -761,6 +857,10 @@ app.get('/embed.js', (req, res) => {
 
     root.innerHTML =
       '<div style="max-width:640px;margin:0 auto;font-family:inherit;">' +
+        '<div style="margin-bottom:16px;">' +
+          '<div style="font-size:20px;font-weight:700;color:#ece4d3;margin-bottom:6px;">Frikkie&#39;s Rig Builder</div>' +
+          '<div style="font-size:14px;color:#a89f8c;line-height:1.5;">Please select your vehicle from the selection below to see what products we recommend for your build.</div>' +
+        '</div>' +
         '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;">' +
           '<select class="' + uid + '-make" style="' + selStyle + '"></select>' +
           '<select class="' + uid + '-year" style="' + selStyle + '" disabled></select>' +

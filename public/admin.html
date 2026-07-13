@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>4x4 Factory SA — Hotspot Admin</title>
+<title>Frikkie's Rig Builder — Behind the Scenes</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -106,10 +106,13 @@
 <div id="app">
 
   <div class="topbar">
-    <div>
-      <div class="eyebrow">4x4 Factory SA · Internal Tool</div>
-      <h1>Hotspot Admin</h1>
-      <p class="sub">Vehicles with fitment hotspots linked to real products on the store.</p>
+    <div style="display:flex;align-items:center;gap:14px;">
+      <img id="storeLogo" src="" alt="4x4 Factory SA" style="height:36px;display:none;">
+      <div>
+        <div class="eyebrow">4x4 Factory SA · Internal Tool</div>
+        <h1>Frikkie's Rig Builder — Behind the Scenes</h1>
+        <p class="sub">Vehicles with fitment hotspots linked to real products on the store.</p>
+      </div>
     </div>
   </div>
 
@@ -119,6 +122,12 @@
       <h2 style="font-family:'Oswald',sans-serif;font-size:13px;text-transform:uppercase;letter-spacing:0.04em;margin:0 0 8px;">Make/Model picker embed (one, reused everywhere)</h2>
       <div class="embed-box" id="pickerEmbedBox"></div>
       <p class="sub" style="margin-top:8px;">Paste this once on your "Build Your Rig" page. It shows Make/Year/Model/Submodel dropdowns and reveals the matching vehicle's hotspot diagram inline once a customer narrows it down — reads Make/Model/Submodel/Year from every vehicle below, so nothing else to configure here.</p>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
+      <input type="text" id="vehicleFilter" placeholder="Filter by make, model, submodel, or name…" style="flex:1;min-width:220px;background:var(--panel-2);border:1px solid var(--line);color:var(--parchment);padding:10px;border-radius:3px;font-family:'Inter',sans-serif;font-size:13px;">
+      <button class="btn" id="exportVehiclesBtn">Export backup</button>
+      <label class="btn" for="importVehiclesInput" style="display:inline-block;">Import backup</label>
+      <input type="file" id="importVehiclesInput" accept="application/json" style="display:none;">
     </div>
     <div class="grid-list" id="vehicleGrid"></div>
   </div>
@@ -273,7 +282,12 @@ async function loadVehicles(){
 function renderList(){
   const grid = document.getElementById('vehicleGrid');
   grid.innerHTML = '';
-  vehicles.forEach(v=>{
+  const q = (document.getElementById('vehicleFilter').value || '').toLowerCase().trim();
+  const filtered = !q ? vehicles : vehicles.filter(v=>{
+    const hay = [v.name, v.make, v.model, v.submodel].filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+  filtered.forEach(v=>{
     const card = document.createElement('div');
     card.className = 'v-card';
     const years = v.year_from ? (v.year_from + (v.year_to ? ('–' + v.year_to) : '+')) : '';
@@ -289,6 +303,58 @@ function renderList(){
   newCard.onclick = ()=> openEditor(null);
   grid.appendChild(newCard);
 }
+document.getElementById('vehicleFilter').addEventListener('input', renderList);
+
+document.getElementById('exportVehiclesBtn').addEventListener('click', ()=>{
+  const blob = new Blob([JSON.stringify(vehicles, null, 2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'rig-builder-backup-' + new Date().toISOString().slice(0,10) + '.json';
+  a.click();
+});
+
+document.getElementById('importVehiclesInput').addEventListener('change', async (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const text = await file.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch(err){ alert('That file is not valid JSON.'); return; }
+  if(!Array.isArray(data)){ alert('Expected a backup file exported from this tool (a list of vehicles).'); return; }
+  if(!confirm('Import ' + data.length + ' vehicle(s)? Vehicles with a matching ID will be overwritten, others will be added as new.')) {
+    e.target.value = '';
+    return;
+  }
+  let ok = 0, failed = 0;
+  for(const v of data){
+    try{
+      const res = await api('/api/admin/vehicles', {
+        method:'POST',
+        body: JSON.stringify({
+          id: v.id, name: v.name, imageUrl: v.image_url,
+          make: v.make, model: v.model, submodel: v.submodel,
+          yearFrom: v.year_from, yearTo: v.year_to,
+          hotspots: (v.hotspots||[]).map(h=>({
+            id:h.id, x:h.x, y:h.y, label:h.label, desc:h.desc, mode: h.mode || 'single',
+            productId:h.product_id, productHandle:h.product_handle, productTitle:h.product_title,
+            productPrice:h.product_price, productImage:h.product_image, variantId:h.variant_id,
+            collectionId:h.collection_id, collectionHandle:h.collection_handle, collectionTitle:h.collection_title,
+            products:(h.products||[]).map(p=>({
+              productId:p.product_id, handle:p.product_handle, title:p.product_title,
+              price:p.product_price, image:p.product_image, variantId:p.variant_id
+            }))
+          }))
+        })
+      });
+      const result = await res.json();
+      if(result.error) throw new Error(result.error);
+      ok++;
+    }catch(err){ console.error('Import failed for', v.name, err); failed++; }
+  }
+  e.target.value = '';
+  alert('Imported ' + ok + ' vehicle(s)' + (failed ? (', ' + failed + ' failed (see console)') : '') + '.');
+  loadVehicles();
+});
 
 function backToList(){
   document.getElementById('editorView').classList.add('hidden');
@@ -466,6 +532,27 @@ function renderEditor(){
   renderPickedProduct(h);
   renderPickedCollection(h);
   renderMultiProductList(h);
+  ensureVariantsLoaded(h);
+}
+
+// Saved hotspots don't carry the full variant list from the server (it's not
+// stored — only the chosen variantId is), so pull it in on demand whenever a
+// hotspot with a picked product/products is reopened, and re-render once it lands.
+async function ensureVariantsLoaded(h){
+  if((h.mode||'single') === 'single' && h.productId && !h.availableVariants){
+    const res = await api('/api/admin/shopify/product-variants?id=' + encodeURIComponent(h.productId));
+    h.availableVariants = await res.json();
+    if(activePinId === h.id) renderPickedProduct(h);
+  }
+  if(h.mode === 'multi' && h.products){
+    for(const p of h.products){
+      if(p.productId && !p.availableVariants){
+        const res = await api('/api/admin/shopify/product-variants?id=' + encodeURIComponent(p.productId));
+        p.availableVariants = await res.json();
+        if(activePinId === h.id) renderMultiProductList(h);
+      }
+    }
+  }
 }
 
 document.getElementById('f_mode').addEventListener('change', (e)=>{
@@ -478,11 +565,36 @@ document.getElementById('f_mode').addEventListener('change', (e)=>{
 function renderPickedProduct(h){
   const el = document.getElementById('pickedProduct');
   if(!h.productTitle){ el.innerHTML = ''; return; }
+  const variants = h.availableVariants || [];
   el.innerHTML = `<div class="picked-product">
     <img src="${h.productImage||''}" onerror="this.style.display='none'">
     <div class="t">${h.productTitle}</div>
     <div class="p">R ${Number(h.productPrice||0).toLocaleString('en-ZA')}</div>
   </div>`;
+  if(variants.length > 1){
+    const wrap = document.createElement('div');
+    wrap.className = 'field';
+    wrap.style.marginTop = '8px';
+    wrap.innerHTML = `<label>Variant (this product has ${variants.length})</label>`;
+    const sel = document.createElement('select');
+    sel.style.cssText = "background:var(--panel-2);border:1px solid var(--line);color:var(--parchment);padding:9px 10px;border-radius:3px;font-family:'Inter',sans-serif;font-size:13px;width:100%;";
+    variants.forEach(v=>{
+      const opt = document.createElement('option');
+      opt.value = v.variantId;
+      opt.textContent = v.title + ' — R ' + Number(v.price||0).toLocaleString('en-ZA');
+      if(v.variantId === h.variantId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.addEventListener('change', ()=>{
+      const chosen = variants.find(v=>v.variantId===sel.value);
+      if(!chosen) return;
+      h.variantId = chosen.variantId;
+      h.productPrice = chosen.price;
+      renderPickedProduct(h);
+    });
+    wrap.appendChild(sel);
+    el.appendChild(wrap);
+  }
 }
 
 document.getElementById('f_label').addEventListener('input', e=>{
@@ -519,6 +631,7 @@ document.getElementById('f_search').addEventListener('input', (e)=>{
         const h = current.hotspots.find(h=>h.id===activePinId); if(!h) return;
         h.productId = p.productId; h.productHandle = p.handle; h.productTitle = p.title;
         h.productPrice = p.price; h.productImage = p.image; h.variantId = p.variantId;
+        h.availableVariants = p.variants || [];
         box.classList.add('hidden');
         document.getElementById('f_search').value = '';
         renderPickedProduct(h); renderPinList();
@@ -594,7 +707,7 @@ document.getElementById('f_multiSearch').addEventListener('input', (e)=>{
       item.onclick = ()=>{
         const h = current.hotspots.find(h=>h.id===activePinId); if(!h) return;
         if(!h.products) h.products = [];
-        h.products.push({ productId:p.productId, handle:p.handle, title:p.title, price:p.price, image:p.image, variantId:p.variantId });
+        h.products.push({ productId:p.productId, handle:p.handle, title:p.title, price:p.price, image:p.image, variantId:p.variantId, availableVariants: p.variants || [] });
         box.classList.add('hidden');
         document.getElementById('f_multiSearch').value = '';
         renderMultiProductList(h);
@@ -611,16 +724,39 @@ function renderMultiProductList(h){
   if(!h.products || !h.products.length){ el.innerHTML = '<div class="empty-note">No products added yet.</div>'; return; }
   el.innerHTML = '';
   h.products.forEach((p, i)=>{
+    const wrap = document.createElement('div');
+    wrap.style.marginTop = '6px';
     const row = document.createElement('div');
     row.className = 'picked-product';
-    row.style.marginTop = '6px';
     const del = document.createElement('span');
     del.textContent = '✕';
     del.style.cssText = 'cursor:pointer;color:var(--khaki);margin-left:6px;flex:none;';
     del.onclick = ()=>{ h.products.splice(i,1); renderMultiProductList(h); renderPinList(); };
     row.innerHTML = `<img src="${p.image||''}" onerror="this.style.display='none'"><div class="t">${p.title}</div><div class="p">R ${Number(p.price||0).toLocaleString('en-ZA')}</div>`;
     row.appendChild(del);
-    el.appendChild(row);
+    wrap.appendChild(row);
+
+    const variants = p.availableVariants || [];
+    if(variants.length > 1){
+      const sel = document.createElement('select');
+      sel.style.cssText = "margin-top:4px;background:var(--panel-2);border:1px solid var(--line);color:var(--parchment);padding:7px 8px;border-radius:3px;font-family:'Inter',sans-serif;font-size:12px;width:100%;";
+      variants.forEach(v=>{
+        const opt = document.createElement('option');
+        opt.value = v.variantId;
+        opt.textContent = v.title + ' — R ' + Number(v.price||0).toLocaleString('en-ZA');
+        if(v.variantId === p.variantId) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.addEventListener('change', ()=>{
+        const chosen = variants.find(v=>v.variantId===sel.value);
+        if(!chosen) return;
+        p.variantId = chosen.variantId;
+        p.price = chosen.price;
+        renderMultiProductList(h);
+      });
+      wrap.appendChild(sel);
+    }
+    el.appendChild(wrap);
   });
 }
 
@@ -673,6 +809,17 @@ async function refreshFromShopify(){
 }
 
 loadVehicles();
+(async ()=>{
+  try{
+    const res = await fetch('/api/admin/config');
+    const cfg = await res.json();
+    if(cfg.logoUrl){
+      const img = document.getElementById('storeLogo');
+      img.src = cfg.logoUrl;
+      img.style.display = 'block';
+    }
+  }catch(err){ /* logo is optional, ignore failures */ }
+})();
 </script>
 </body>
 </html>
