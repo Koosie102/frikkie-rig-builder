@@ -857,7 +857,7 @@ app.get('/embed.js', (req, res) => {
 
     root.innerHTML =
       '<div style="max-width:640px;margin:0 auto;font-family:inherit;">' +
-        '<div style="margin-bottom:16px;">' +
+        '<div style="background:#1c1914;border:1px solid #3a3428;border-radius:4px;padding:16px;margin-bottom:16px;">' +
           '<div style="font-size:20px;font-weight:700;color:#ece4d3;margin-bottom:6px;">Frikkie&#39;s Rig Builder</div>' +
           '<div style="font-size:14px;color:#a89f8c;line-height:1.5;">Please select your vehicle from the selection below to see what products we recommend for your build.</div>' +
         '</div>' +
