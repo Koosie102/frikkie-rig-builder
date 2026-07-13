@@ -196,12 +196,43 @@
               <label>Label (short, on-hover title)</label>
               <input type="text" id="f_label" placeholder="e.g. Roof">
             </div>
-            <div class="field search-wrap">
-              <label>Shopify product</label>
-              <input type="text" id="f_search" placeholder="Search your store's products…" autocomplete="off">
-              <div class="search-results hidden" id="searchResults"></div>
-              <div id="pickedProduct"></div>
+
+            <div class="field">
+              <label>Link type</label>
+              <select id="f_mode" style="background:var(--panel-2);border:1px solid var(--line);color:var(--parchment);padding:9px 10px;border-radius:3px;font-family:'Inter',sans-serif;font-size:13px;">
+                <option value="single">Single product</option>
+                <option value="collection">Shopify collection (customer picks one)</option>
+                <option value="multi">Multiple products, hand-picked (customer picks one)</option>
+              </select>
             </div>
+
+            <div id="singleModeFields">
+              <div class="field search-wrap">
+                <label>Shopify product</label>
+                <input type="text" id="f_search" placeholder="Search your store's products…" autocomplete="off">
+                <div class="search-results hidden" id="searchResults"></div>
+                <div id="pickedProduct"></div>
+              </div>
+            </div>
+
+            <div id="collectionModeFields" class="hidden">
+              <div class="field search-wrap">
+                <label>Shopify collection</label>
+                <input type="text" id="f_collectionSearch" placeholder="Search your store's collections…" autocomplete="off">
+                <div class="search-results hidden" id="collectionSearchResults"></div>
+                <div id="pickedCollection"></div>
+              </div>
+            </div>
+
+            <div id="multiModeFields" class="hidden">
+              <div class="field search-wrap">
+                <label>Add products (customer will pick one)</label>
+                <input type="text" id="f_multiSearch" placeholder="Search your store's products to add…" autocomplete="off">
+                <div class="search-results hidden" id="multiSearchResults"></div>
+              </div>
+              <div id="multiProductList"></div>
+            </div>
+
             <div class="field">
               <label>Short description (shown on click)</label>
               <textarea id="f_desc" placeholder="One or two lines about fitment."></textarea>
@@ -273,8 +304,14 @@ function openEditor(v){
     yearFrom: v.year_from || '', yearTo: v.year_to || '',
     hotspots: v.hotspots.map(h=>({
       id:h.id, x:h.x, y:h.y, label:h.label, desc:h.desc,
+      mode: h.mode || 'single',
       productId:h.product_id, productHandle:h.product_handle, productTitle:h.product_title,
-      productPrice:h.product_price, productImage:h.product_image, variantId:h.variant_id
+      productPrice:h.product_price, productImage:h.product_image, variantId:h.variant_id,
+      collectionId: h.collection_id, collectionHandle: h.collection_handle, collectionTitle: h.collection_title,
+      products: (h.products||[]).map(p=>({
+        productId:p.product_id, handle:p.product_handle, title:p.product_title,
+        price:p.product_price, image:p.product_image, variantId:p.variant_id
+      }))
     }))
   } : { id:null, name:'', imageUrl:null, slug:null, make:'', model:'', submodel:'', yearFrom:'', yearTo:'', hotspots:[] };
   activePinId = null;
@@ -358,7 +395,9 @@ function renderStage(){
     const y = ((ev.clientY - rect.top)/rect.height)*100;
     pinCounter++;
     const h = {id:'new'+Date.now()+pinCounter, x:+x.toFixed(2), y:+y.toFixed(2), label:'', desc:'',
-      productId:null, productHandle:null, productTitle:null, productPrice:null, productImage:null, variantId:null};
+      mode:'single',
+      productId:null, productHandle:null, productTitle:null, productPrice:null, productImage:null, variantId:null,
+      collectionId:null, collectionHandle:null, collectionTitle:null, products:[]};
     current.hotspots.push(h);
     activePinId = h.id;
     renderStage(); renderPinList(); renderEditor();
@@ -380,6 +419,12 @@ document.addEventListener('mousemove', (ev)=>{
 });
 document.addEventListener('mouseup', ()=>{ dragging = null; });
 
+function hotspotLabel(h){
+  if(h.mode === 'collection') return h.collectionTitle ? (h.collectionTitle + ' (collection)') : 'Untitled collection';
+  if(h.mode === 'multi') return (h.products && h.products.length) ? (h.products.length + ' products to choose from') : 'No products added';
+  return h.productTitle || 'Untitled';
+}
+
 function renderPinList(){
   const list = document.getElementById('pinList');
   list.innerHTML = '';
@@ -388,7 +433,7 @@ function renderPinList(){
   current.hotspots.forEach((h,i)=>{
     const row = document.createElement('div');
     row.className = 'pin-row' + (h.id===activePinId?' active':'');
-    row.innerHTML = `<span class="num">${String(i+1).padStart(2,'0')}</span><span class="name">${h.productTitle || 'Untitled'}</span><span class="del">✕</span>`;
+    row.innerHTML = `<span class="num">${String(i+1).padStart(2,'0')}</span><span class="name">${hotspotLabel(h)}</span><span class="del">✕</span>`;
     row.querySelector('.name').onclick = ()=>{ activePinId = h.id; renderPinList(); renderEditor(); renderStage(); };
     row.querySelector('.num').onclick = ()=>{ activePinId = h.id; renderPinList(); renderEditor(); renderStage(); };
     row.querySelector('.del').onclick = (e)=>{
@@ -410,8 +455,25 @@ function renderEditor(){
   document.getElementById('f_desc').value = h.desc || '';
   document.getElementById('f_search').value = '';
   document.getElementById('searchResults').classList.add('hidden');
+  document.getElementById('f_collectionSearch').value = '';
+  document.getElementById('collectionSearchResults').classList.add('hidden');
+  document.getElementById('f_multiSearch').value = '';
+  document.getElementById('multiSearchResults').classList.add('hidden');
+  document.getElementById('f_mode').value = h.mode || 'single';
+  document.getElementById('singleModeFields').classList.toggle('hidden', (h.mode||'single') !== 'single');
+  document.getElementById('collectionModeFields').classList.toggle('hidden', h.mode !== 'collection');
+  document.getElementById('multiModeFields').classList.toggle('hidden', h.mode !== 'multi');
   renderPickedProduct(h);
+  renderPickedCollection(h);
+  renderMultiProductList(h);
 }
+
+document.getElementById('f_mode').addEventListener('change', (e)=>{
+  const h = current.hotspots.find(h=>h.id===activePinId); if(!h) return;
+  h.mode = e.target.value;
+  renderEditor();
+  renderPinList();
+});
 
 function renderPickedProduct(h){
   const el = document.getElementById('pickedProduct');
@@ -466,6 +528,102 @@ document.getElementById('f_search').addEventListener('input', (e)=>{
     box.classList.remove('hidden');
   }, 300);
 });
+
+let collectionSearchDebounce = null;
+document.getElementById('f_collectionSearch').addEventListener('input', (e)=>{
+  clearTimeout(collectionSearchDebounce);
+  const q = e.target.value.trim();
+  const box = document.getElementById('collectionSearchResults');
+  if(!q){ box.classList.add('hidden'); return; }
+  collectionSearchDebounce = setTimeout(async ()=>{
+    const res = await api('/api/admin/shopify/search-collections?q=' + encodeURIComponent(q));
+    const results = await res.json();
+    box.innerHTML = '';
+    if(!results.length){
+      box.innerHTML = '<div class="search-item" style="cursor:default;">No matches</div>';
+    }
+    results.forEach(c=>{
+      const item = document.createElement('div');
+      item.className = 'search-item';
+      item.innerHTML = `<img src="${c.image||''}" onerror="this.style.display='none'"><div class="t">${c.title}</div>`;
+      item.onclick = async ()=>{
+        const h = current.hotspots.find(h=>h.id===activePinId); if(!h) return;
+        box.classList.add('hidden');
+        document.getElementById('f_collectionSearch').value = '';
+        const el = document.getElementById('pickedCollection');
+        el.innerHTML = '<div class="empty-note">Loading products in this collection…</div>';
+        const prodRes = await api('/api/admin/shopify/collection-products?id=' + encodeURIComponent(c.collectionId));
+        const products = await prodRes.json();
+        h.collectionId = c.collectionId; h.collectionHandle = c.handle; h.collectionTitle = c.title;
+        h.products = products;
+        renderPickedCollection(h);
+        renderPinList();
+      };
+      box.appendChild(item);
+    });
+    box.classList.remove('hidden');
+  }, 300);
+});
+
+function renderPickedCollection(h){
+  const el = document.getElementById('pickedCollection');
+  if(!h.collectionTitle){ el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="picked-product">
+    <div class="t">${h.collectionTitle}</div>
+    <div class="p">${(h.products||[]).length} product${(h.products||[]).length===1?'':'s'}</div>
+  </div>`;
+}
+
+let multiSearchDebounce = null;
+document.getElementById('f_multiSearch').addEventListener('input', (e)=>{
+  clearTimeout(multiSearchDebounce);
+  const q = e.target.value.trim();
+  const box = document.getElementById('multiSearchResults');
+  if(!q){ box.classList.add('hidden'); return; }
+  multiSearchDebounce = setTimeout(async ()=>{
+    const res = await api('/api/admin/shopify/search-products?q=' + encodeURIComponent(q));
+    const results = await res.json();
+    box.innerHTML = '';
+    if(!results.length){
+      box.innerHTML = '<div class="search-item" style="cursor:default;">No matches</div>';
+    }
+    results.forEach(p=>{
+      const item = document.createElement('div');
+      item.className = 'search-item';
+      item.innerHTML = `<img src="${p.image||''}" onerror="this.style.display='none'"><div class="t">${p.title}</div><div class="p">R ${Number(p.price||0).toLocaleString('en-ZA')}</div>`;
+      item.onclick = ()=>{
+        const h = current.hotspots.find(h=>h.id===activePinId); if(!h) return;
+        if(!h.products) h.products = [];
+        h.products.push({ productId:p.productId, handle:p.handle, title:p.title, price:p.price, image:p.image, variantId:p.variantId });
+        box.classList.add('hidden');
+        document.getElementById('f_multiSearch').value = '';
+        renderMultiProductList(h);
+        renderPinList();
+      };
+      box.appendChild(item);
+    });
+    box.classList.remove('hidden');
+  }, 300);
+});
+
+function renderMultiProductList(h){
+  const el = document.getElementById('multiProductList');
+  if(!h.products || !h.products.length){ el.innerHTML = '<div class="empty-note">No products added yet.</div>'; return; }
+  el.innerHTML = '';
+  h.products.forEach((p, i)=>{
+    const row = document.createElement('div');
+    row.className = 'picked-product';
+    row.style.marginTop = '6px';
+    const del = document.createElement('span');
+    del.textContent = '✕';
+    del.style.cssText = 'cursor:pointer;color:var(--khaki);margin-left:6px;flex:none;';
+    del.onclick = ()=>{ h.products.splice(i,1); renderMultiProductList(h); renderPinList(); };
+    row.innerHTML = `<img src="${p.image||''}" onerror="this.style.display='none'"><div class="t">${p.title}</div><div class="p">R ${Number(p.price||0).toLocaleString('en-ZA')}</div>`;
+    row.appendChild(del);
+    el.appendChild(row);
+  });
+}
+
 
 function renderEmbedBox(){
   const box = document.getElementById('embedBox');

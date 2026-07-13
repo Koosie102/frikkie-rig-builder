@@ -62,6 +62,44 @@ db.exec(`
   addCol('year_to', 'INTEGER');
 }
 
+// Same for hotspots — add the fields needed for collection/multi-product mode.
+{
+  const cols = db.prepare("PRAGMA table_info(hotspots)").all().map((c) => c.name);
+  const addCol = (name, def) => {
+    if (!cols.includes(name)) db.exec(`ALTER TABLE hotspots ADD COLUMN ${name} ${def}`);
+  };
+  addCol('mode', "TEXT DEFAULT 'single'");
+  addCol('collection_id', 'TEXT');
+  addCol('collection_handle', 'TEXT');
+  addCol('collection_title', 'TEXT');
+}
+
+// Curated / collection product lists for a hotspot in 'multi' or 'collection' mode.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS hotspot_products (
+    id TEXT PRIMARY KEY,
+    hotspot_id TEXT NOT NULL REFERENCES hotspots(id) ON DELETE CASCADE,
+    sort_order INTEGER DEFAULT 0,
+    product_id TEXT,
+    product_handle TEXT,
+    product_title TEXT,
+    product_price TEXT,
+    product_image TEXT,
+    variant_id TEXT
+  );
+`);
+
+// Fetch a vehicle's hotspots with their curated/collection product lists attached.
+function getHotspotsForVehicle(vehicleId) {
+  const hotspots = db
+    .prepare('SELECT * FROM hotspots WHERE vehicle_id = ? ORDER BY sort_order ASC')
+    .all(vehicleId);
+  const getProducts = db.prepare(
+    'SELECT * FROM hotspot_products WHERE hotspot_id = ? ORDER BY sort_order ASC'
+  );
+  return hotspots.map((h) => ({ ...h, products: getProducts.all(h.id) }));
+}
+
 const slugify = (s) =>
   s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'vehicle';
 const newId = () => crypto.randomBytes(8).toString('hex');
@@ -125,6 +163,53 @@ async function searchShopifyProducts(q) {
     { q: q ? `title:*${q}*` : '' }
   );
   return data.products.edges.map(({ node }) => ({
+    productId: node.id,
+    title: node.title,
+    handle: node.handle,
+    image: node.featuredImage ? node.featuredImage.url : null,
+    variantId: node.variants.edges[0] ? node.variants.edges[0].node.id : null,
+    price: node.variants.edges[0] ? node.variants.edges[0].node.price : null,
+  }));
+}
+
+// Search collections by title for the admin hotspot picker.
+async function searchShopifyCollections(q) {
+  const data = await shopifyGraphQL(
+    `query($q: String!) {
+      collections(first: 12, query: $q) {
+        edges { node { id title handle image { url } } }
+      }
+    }`,
+    { q: q ? `title:*${q}*` : '' }
+  );
+  return data.collections.edges.map(({ node }) => ({
+    collectionId: node.id,
+    title: node.title,
+    handle: node.handle,
+    image: node.image ? node.image.url : null,
+  }));
+}
+
+// Pull products belonging to a collection, for caching against a hotspot.
+async function getCollectionProducts(collectionId, limit = 20) {
+  const data = await shopifyGraphQL(
+    `query($id: ID!, $first: Int!) {
+      collection(id: $id) {
+        products(first: $first) {
+          edges { node {
+            id
+            title
+            handle
+            featuredImage { url }
+            variants(first: 1) { edges { node { id price } } }
+          } }
+        }
+      }
+    }`,
+    { id: collectionId, first: limit }
+  );
+  if (!data.collection) return [];
+  return data.collection.products.edges.map(({ node }) => ({
     productId: node.id,
     title: node.title,
     handle: node.handle,
@@ -217,6 +302,27 @@ app.get('/api/admin/shopify/search-products', async (req, res) => {
   }
 });
 
+app.get('/api/admin/shopify/search-collections', async (req, res) => {
+  try {
+    const results = await searchShopifyCollections(req.query.q || '');
+    res.json(results);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/shopify/collection-products', async (req, res) => {
+  try {
+    if (!req.query.id) return res.status(400).json({ error: 'id is required' });
+    const results = await getCollectionProducts(req.query.id, 20);
+    res.json(results);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/admin/upload-image', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -239,9 +345,7 @@ app.get('/api/admin/vehicles', (req, res) => {
   const vehicles = db.prepare('SELECT * FROM vehicles ORDER BY updated_at DESC').all();
   const withHotspots = vehicles.map((v) => ({
     ...v,
-    hotspots: db
-      .prepare('SELECT * FROM hotspots WHERE vehicle_id = ? ORDER BY sort_order ASC')
-      .all(v.id),
+    hotspots: getHotspotsForVehicle(v.id),
   }));
   res.json(withHotspots);
 });
@@ -249,15 +353,16 @@ app.get('/api/admin/vehicles', (req, res) => {
 app.get('/api/admin/vehicles/:id', (req, res) => {
   const v = db.prepare('SELECT * FROM vehicles WHERE id = ?').get(req.params.id);
   if (!v) return res.status(404).json({ error: 'Not found' });
-  v.hotspots = db
-    .prepare('SELECT * FROM hotspots WHERE vehicle_id = ? ORDER BY sort_order ASC')
-    .all(v.id);
+  v.hotspots = getHotspotsForVehicle(v.id);
   res.json(v);
 });
 
 // Create or update a vehicle + its full hotspot list in one call.
 // Body: { id?, name, imageUrl, make, model, submodel, yearFrom, yearTo,
-//         hotspots: [{x,y,label,desc,productId,productHandle,productTitle,productPrice,productImage,variantId}] }
+//         hotspots: [{x,y,label,desc,mode,
+//           productId,productHandle,productTitle,productPrice,productImage,variantId,   // mode:'single'
+//           collectionId,collectionHandle,collectionTitle,                              // mode:'collection'
+//           products:[{productId,handle,title,price,image,variantId}]}] }               // mode:'collection'|'multi'
 app.post('/api/admin/vehicles', (req, res) => {
   const {
     id, name, imageUrl, hotspots = [],
@@ -282,12 +387,21 @@ app.post('/api/admin/vehicles', (req, res) => {
       year_from = excluded.year_from, year_to = excluded.year_to,
       updated_at = datetime('now')
   `);
+  const clearHotspotProducts = db.prepare(
+    'DELETE FROM hotspot_products WHERE hotspot_id IN (SELECT id FROM hotspots WHERE vehicle_id = ?)'
+  );
   const clearHotspots = db.prepare('DELETE FROM hotspots WHERE vehicle_id = ?');
   const insertHotspot = db.prepare(`
-    INSERT INTO hotspots (id, vehicle_id, sort_order, x, y, label, desc,
-      product_id, product_handle, product_title, product_price, product_image, variant_id)
-    VALUES (@id, @vehicleId, @sortOrder, @x, @y, @label, @desc,
-      @productId, @productHandle, @productTitle, @productPrice, @productImage, @variantId)
+    INSERT INTO hotspots (id, vehicle_id, sort_order, x, y, label, desc, mode,
+      product_id, product_handle, product_title, product_price, product_image, variant_id,
+      collection_id, collection_handle, collection_title)
+    VALUES (@id, @vehicleId, @sortOrder, @x, @y, @label, @desc, @mode,
+      @productId, @productHandle, @productTitle, @productPrice, @productImage, @variantId,
+      @collectionId, @collectionHandle, @collectionTitle)
+  `);
+  const insertHotspotProduct = db.prepare(`
+    INSERT INTO hotspot_products (id, hotspot_id, sort_order, product_id, product_handle, product_title, product_price, product_image, variant_id)
+    VALUES (@id, @hotspotId, @sortOrder, @productId, @productHandle, @productTitle, @productPrice, @productImage, @variantId)
   `);
 
   const tx = db.transaction(() => {
@@ -296,23 +410,45 @@ app.post('/api/admin/vehicles', (req, res) => {
       make, model, submodel,
       yearFrom: yearFrom || null, yearTo: yearTo || null,
     });
+    clearHotspotProducts.run(vehicleId);
     clearHotspots.run(vehicleId);
     hotspots.forEach((h, i) => {
+      const hotspotId = h.id || newId();
+      const mode = h.mode || 'single';
       insertHotspot.run({
-        id: h.id || newId(),
+        id: hotspotId,
         vehicleId,
         sortOrder: i,
         x: h.x,
         y: h.y,
         label: h.label || '',
         desc: h.desc || '',
+        mode,
         productId: h.productId || null,
         productHandle: h.productHandle || null,
         productTitle: h.productTitle || null,
         productPrice: h.productPrice || null,
         productImage: h.productImage || null,
         variantId: h.variantId || null,
+        collectionId: h.collectionId || null,
+        collectionHandle: h.collectionHandle || null,
+        collectionTitle: h.collectionTitle || null,
       });
+      if (mode === 'collection' || mode === 'multi') {
+        (h.products || []).forEach((p, pi) => {
+          insertHotspotProduct.run({
+            id: newId(),
+            hotspotId,
+            sortOrder: pi,
+            productId: p.productId || null,
+            productHandle: p.handle || null,
+            productTitle: p.title || null,
+            productPrice: p.price || null,
+            productImage: p.image || null,
+            variantId: p.variantId || null,
+          });
+        });
+      }
     });
   });
   tx();
@@ -327,19 +463,28 @@ app.delete('/api/admin/vehicles/:id', (req, res) => {
 });
 
 // Re-pull title/price/image for every hotspot on a vehicle from Shopify,
-// in case a linked product's price or title changed since it was picked.
+// in case a linked product's price or title changed since it was picked
+// (or a linked collection's contents changed) since it was last saved.
 app.post('/api/admin/vehicles/:id/refresh', async (req, res) => {
   try {
     const hotspots = db
       .prepare('SELECT * FROM hotspots WHERE vehicle_id = ?')
       .all(req.params.id);
-    const update = db.prepare(`
+    const updateSingle = db.prepare(`
       UPDATE hotspots SET product_title=@title, product_price=@price, product_image=@image
       WHERE id=@id
     `);
-    for (const h of hotspots) {
-      if (!h.product_id) continue;
-      const data = await shopifyGraphQL(
+    const updateHotspotProduct = db.prepare(`
+      UPDATE hotspot_products SET product_title=@title, product_price=@price, product_image=@image
+      WHERE id=@id
+    `);
+    const deleteHotspotProducts = db.prepare('DELETE FROM hotspot_products WHERE hotspot_id = ?');
+    const insertHotspotProduct = db.prepare(`
+      INSERT INTO hotspot_products (id, hotspot_id, sort_order, product_id, product_handle, product_title, product_price, product_image, variant_id)
+      VALUES (@id, @hotspotId, @sortOrder, @productId, @productHandle, @productTitle, @productPrice, @productImage, @variantId)
+    `);
+    const fetchProduct = (productId) =>
+      shopifyGraphQL(
         `query($id: ID!) {
           product(id: $id) {
             title
@@ -347,16 +492,53 @@ app.post('/api/admin/vehicles/:id/refresh', async (req, res) => {
             variants(first: 1) { edges { node { price } } }
           }
         }`,
-        { id: h.product_id }
+        { id: productId }
       );
-      const p = data.product;
-      if (!p) continue;
-      update.run({
-        id: h.id,
-        title: p.title,
-        price: p.variants.edges[0]?.node.price || h.product_price,
-        image: p.featuredImage?.url || h.product_image,
-      });
+
+    for (const h of hotspots) {
+      const mode = h.mode || 'single';
+      if (mode === 'single') {
+        if (!h.product_id) continue;
+        const data = await fetchProduct(h.product_id);
+        const p = data.product;
+        if (!p) continue;
+        updateSingle.run({
+          id: h.id,
+          title: p.title,
+          price: p.variants.edges[0]?.node.price || h.product_price,
+          image: p.featuredImage?.url || h.product_image,
+        });
+      } else if (mode === 'collection' && h.collection_id) {
+        const products = await getCollectionProducts(h.collection_id, 20);
+        deleteHotspotProducts.run(h.id);
+        products.forEach((p, i) => {
+          insertHotspotProduct.run({
+            id: newId(),
+            hotspotId: h.id,
+            sortOrder: i,
+            productId: p.productId || null,
+            productHandle: p.handle || null,
+            productTitle: p.title || null,
+            productPrice: p.price || null,
+            productImage: p.image || null,
+            variantId: p.variantId || null,
+          });
+        });
+      } else if (mode === 'multi') {
+        const items = db.prepare('SELECT * FROM hotspot_products WHERE hotspot_id = ?').all(h.id);
+        for (const item of items) {
+          if (!item.product_id) continue;
+          const data = await fetchProduct(item.product_id);
+          const p = data.product;
+          if (!p) continue;
+          updateHotspotProduct.run({
+            id: item.id,
+            title: p.title,
+            price: p.variants.edges[0]?.node.price || item.product_price,
+            image: p.featuredImage?.url || item.product_image,
+          });
+        }
+      }
     }
     res.json({ ok: true });
   } catch (err) {
@@ -395,21 +577,39 @@ app.get('/api/vehicles/:slug', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
   const v = db.prepare('SELECT * FROM vehicles WHERE slug = ?').get(req.params.slug);
   if (!v) return res.status(404).json({ error: 'Not found' });
+  const getProducts = db.prepare(
+    'SELECT * FROM hotspot_products WHERE hotspot_id = ? ORDER BY sort_order ASC'
+  );
   const hotspots = db
     .prepare('SELECT * FROM hotspots WHERE vehicle_id = ? ORDER BY sort_order ASC')
     .all(v.id)
-    .map((h) => ({
-      x: h.x,
-      y: h.y,
-      label: h.label,
-      desc: h.desc,
-      title: h.product_title,
-      price: h.product_price,
-      image: h.product_image,
-      handle: h.product_handle,
-      variantId: h.variant_id,
-      url: h.product_handle ? `${STOREFRONT_URL}/products/${h.product_handle}` : null,
-    }));
+    .map((h) => {
+      const mode = h.mode || 'single';
+      const base = { x: h.x, y: h.y, label: h.label, desc: h.desc, mode };
+      if (mode === 'single') {
+        return {
+          ...base,
+          title: h.product_title,
+          price: h.product_price,
+          image: h.product_image,
+          handle: h.product_handle,
+          variantId: h.variant_id,
+          url: h.product_handle ? `${STOREFRONT_URL}/products/${h.product_handle}` : null,
+        };
+      }
+      return {
+        ...base,
+        collectionTitle: h.collection_title,
+        products: getProducts.all(h.id).map((p) => ({
+          title: p.product_title,
+          price: p.product_price,
+          image: p.product_image,
+          handle: p.product_handle,
+          variantId: p.variant_id,
+          url: p.product_handle ? `${STOREFRONT_URL}/products/${p.product_handle}` : null,
+        })),
+      };
+    });
   res.json({ name: v.name, slug: v.slug, image: v.image_url, hotspots });
 });
 
@@ -422,6 +622,20 @@ app.get('/embed.js', (req, res) => {
 
   function fmtZAR(n){ return n ? ('R ' + Number(n).toLocaleString('en-ZA')) : ''; }
 
+  function addToCart(variantId, btnEl, label){
+    if(!variantId) return;
+    var numericId = variantId.split('/').pop();
+    var original = label || btnEl.textContent;
+    fetch('/cart/add.js', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ items: [{ id: numericId, quantity: 1 }] })
+    }).then(function(r){
+      if(r.ok){ btnEl.textContent = 'Added!'; setTimeout(function(){ btnEl.textContent = original; }, 1500); }
+      else { btnEl.textContent = 'Try again'; }
+    }).catch(function(){ btnEl.textContent = 'Try again'; });
+  }
+
   function render(root, data){
     var uid = 'fxf' + Math.random().toString(36).slice(2,9);
     root.innerHTML =
@@ -431,19 +645,26 @@ app.get('/embed.js', (req, res) => {
           '<div class="' + uid + '-pins"></div>' +
         '</div>' +
         '<div class="' + uid + '-panel" style="display:none;margin-top:14px;border:1px solid #3a3428;background:#1c1914;color:#ece4d3;border-radius:4px;padding:16px;">' +
-          '<div style="display:flex;gap:14px;align-items:flex-start;">' +
-            '<img class="' + uid + '-img" style="width:64px;height:64px;object-fit:cover;border-radius:3px;flex:none;">' +
-            '<div style="flex:1;min-width:0;">' +
-              '<div class="' + uid + '-title" style="font-size:16px;font-weight:700;margin-bottom:4px;"></div>' +
-              '<div class="' + uid + '-desc" style="font-size:13px;color:#a89f8c;line-height:1.5;margin-bottom:10px;"></div>' +
-              '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">' +
-                '<div class="' + uid + '-price" style="font-size:18px;font-weight:700;"></div>' +
-                '<div style="display:flex;gap:8px;">' +
-                  '<button class="' + uid + '-add" style="background:#d9a441;color:#151310;border:none;font-weight:700;padding:9px 14px;border-radius:3px;font-size:12.5px;cursor:pointer;">Add to cart</button>' +
-                  '<a class="' + uid + '-link" href="#" style="border:1px solid #6b6748;color:#ece4d3;text-decoration:none;font-weight:700;padding:9px 14px;border-radius:3px;font-size:12.5px;">View</a>' +
+          '<div class="' + uid + '-single">' +
+            '<div style="display:flex;gap:14px;align-items:flex-start;">' +
+              '<img class="' + uid + '-img" style="width:64px;height:64px;object-fit:cover;border-radius:3px;flex:none;">' +
+              '<div style="flex:1;min-width:0;">' +
+                '<div class="' + uid + '-title" style="font-size:16px;font-weight:700;margin-bottom:4px;"></div>' +
+                '<div class="' + uid + '-desc" style="font-size:13px;color:#a89f8c;line-height:1.5;margin-bottom:10px;"></div>' +
+                '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">' +
+                  '<div class="' + uid + '-price" style="font-size:18px;font-weight:700;"></div>' +
+                  '<div style="display:flex;gap:8px;">' +
+                    '<button class="' + uid + '-add" style="background:#d9a441;color:#151310;border:none;font-weight:700;padding:9px 14px;border-radius:3px;font-size:12.5px;cursor:pointer;">Add to cart</button>' +
+                    '<a class="' + uid + '-link" href="#" style="border:1px solid #6b6748;color:#ece4d3;text-decoration:none;font-weight:700;padding:9px 14px;border-radius:3px;font-size:12.5px;">View</a>' +
+                  '</div>' +
                 '</div>' +
               '</div>' +
             '</div>' +
+          '</div>' +
+          '<div class="' + uid + '-options" style="display:none;">' +
+            '<div class="' + uid + '-optionsTitle" style="font-size:14px;font-weight:700;margin-bottom:4px;"></div>' +
+            '<div class="' + uid + '-optionsDesc" style="font-size:13px;color:#a89f8c;line-height:1.5;margin-bottom:10px;"></div>' +
+            '<div class="' + uid + '-optionsList" style="display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;"></div>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -457,6 +678,11 @@ app.get('/embed.js', (req, res) => {
 
     var pinLayer = root.querySelector('.' + uid + '-pins');
     var panel = root.querySelector('.' + uid + '-panel');
+    var singleBlock = root.querySelector('.' + uid + '-single');
+    var optionsBlock = root.querySelector('.' + uid + '-options');
+    var optionsTitle = root.querySelector('.' + uid + '-optionsTitle');
+    var optionsDesc = root.querySelector('.' + uid + '-optionsDesc');
+    var optionsList = root.querySelector('.' + uid + '-optionsList');
     var titleEl = root.querySelector('.' + uid + '-title');
     var descEl = root.querySelector('.' + uid + '-desc');
     var priceEl = root.querySelector('.' + uid + '-price');
@@ -470,34 +696,59 @@ app.get('/embed.js', (req, res) => {
       el.className = uid + '-pin';
       el.style.left = h.x + '%';
       el.style.top = h.y + '%';
-      el.title = h.label || h.title || '';
+      el.title = h.label || h.title || h.collectionTitle || '';
       el.innerHTML = '<span class="ring"></span><span class="dot"></span>';
       el.addEventListener('click', function(){
         if(activePin) activePin.classList.remove('active');
         el.classList.add('active');
         activePin = el; activeData = h;
-        titleEl.textContent = h.title || '';
-        descEl.textContent = h.desc || '';
-        priceEl.textContent = fmtZAR(h.price);
-        imgEl.src = h.image || '';
-        imgEl.style.display = h.image ? 'block' : 'none';
-        linkEl.href = h.url || '#';
         panel.style.display = 'block';
+
+        if(h.mode === 'multi' || h.mode === 'collection'){
+          singleBlock.style.display = 'none';
+          optionsBlock.style.display = 'block';
+          optionsTitle.textContent = h.label || h.collectionTitle || 'Choose an option';
+          optionsDesc.textContent = h.desc || '';
+          optionsList.innerHTML = '';
+          (h.products || []).forEach(function(p){
+            var row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:10px;align-items:center;border:1px solid #3a3428;border-radius:3px;padding:8px;';
+            var img = document.createElement('img');
+            img.src = p.image || '';
+            img.style.cssText = 'width:44px;height:44px;object-fit:cover;border-radius:2px;flex:none;';
+            var mid = document.createElement('div');
+            mid.style.cssText = 'flex:1;min-width:0;';
+            mid.innerHTML =
+              '<div style="font-size:13px;font-weight:600;">' + (p.title || '') + '</div>' +
+              '<div style="font-size:12px;color:#a89f8c;">' + fmtZAR(p.price) + '</div>';
+            var addRowBtn = document.createElement('button');
+            addRowBtn.textContent = 'Add';
+            addRowBtn.style.cssText = 'background:#d9a441;color:#151310;border:none;font-weight:700;padding:7px 10px;border-radius:3px;font-size:11.5px;cursor:pointer;flex:none;';
+            addRowBtn.addEventListener('click', function(){ addToCart(p.variantId, addRowBtn, 'Add'); });
+            var viewLink = document.createElement('a');
+            viewLink.textContent = 'View';
+            viewLink.href = p.url || '#';
+            viewLink.style.cssText = 'border:1px solid #6b6748;color:#ece4d3;text-decoration:none;font-weight:700;padding:7px 10px;border-radius:3px;font-size:11.5px;flex:none;';
+            row.appendChild(img); row.appendChild(mid); row.appendChild(addRowBtn); row.appendChild(viewLink);
+            optionsList.appendChild(row);
+          });
+        } else {
+          optionsBlock.style.display = 'none';
+          singleBlock.style.display = 'block';
+          titleEl.textContent = h.title || '';
+          descEl.textContent = h.desc || '';
+          priceEl.textContent = fmtZAR(h.price);
+          imgEl.src = h.image || '';
+          imgEl.style.display = h.image ? 'block' : 'none';
+          linkEl.href = h.url || '#';
+        }
       });
       pinLayer.appendChild(el);
     });
 
     addBtn.addEventListener('click', function(){
       if(!activeData || !activeData.variantId) return;
-      var numericId = activeData.variantId.split('/').pop();
-      fetch('/cart/add.js', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ items: [{ id: numericId, quantity: 1 }] })
-      }).then(function(r){
-        if(r.ok){ addBtn.textContent = 'Added!'; setTimeout(function(){ addBtn.textContent = 'Add to cart'; }, 1500); }
-        else { addBtn.textContent = 'Try again'; }
-      }).catch(function(){ addBtn.textContent = 'Try again'; });
+      addToCart(activeData.variantId, addBtn, 'Add to cart');
     });
   }
 
