@@ -357,6 +357,11 @@ function getMailTransport() {
     port: Number(SMTP_PORT) || 587,
     secure: Number(SMTP_PORT) === 465,
     auth: { user: SMTP_USER, pass: SMTP_PASS },
+    // Fail fast on a bad host/port/firewall instead of hanging for minutes —
+    // nodemailer's defaults are much longer than this app should ever wait.
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
   });
   return mailTransport;
 }
@@ -820,7 +825,10 @@ app.post('/api/quote-request', async (req, res) => {
             input: {
               lineItems,
               email: customer.email,
-              phone: customer.phone,
+              // Not passing `phone` here — Shopify validates its format
+              // strictly and rejects anything that doesn't match, which was
+              // silently failing the whole draft order. It's already in the
+              // note text below, which isn't format-checked.
               note: noteLines.join('\n'),
             },
           }
@@ -835,12 +843,12 @@ app.post('/api/quote-request', async (req, res) => {
       }
     }
 
-    // Best-effort — a broken SMTP config shouldn't fail the customer's request.
-    try {
-      await sendQuoteEmail({ vehicleName, customer, items, draftOrder });
-    } catch (mailErr) {
+    // Fire-and-forget — the customer's response must never wait on SMTP.
+    // Even with the timeouts above, there's no reason to make them sit
+    // through it; log-and-move-on is the right behavior here.
+    sendQuoteEmail({ vehicleName, customer, items, draftOrder }).catch((mailErr) => {
       console.error('Quote email failed:', mailErr);
-    }
+    });
 
     res.json({ ok: true, draftOrderName: draftOrder ? draftOrder.name : null });
   } catch (err) {
