@@ -24,7 +24,34 @@ const {
   SMTP_PASS = '',
   SMTP_FROM = '',
   NOTIFY_EMAIL = '',
+  // South Africa-only flat rate, tiered by order subtotal — matches the
+  // store's actual Shopify shipping zone config. "max" is the top of that
+  // tier's order-value range; the last entry (max: null) catches anything
+  // above the highest bound. Override via Railway if these rates change.
+  SHIPPING_TIERS = JSON.stringify([
+    { max: 5000, rate: 115 },
+    { max: 15000, rate: 180 },
+    { max: 23000, rate: 220 },
+    { max: 50000, rate: 300 },
+    { max: 100000, rate: 550 },
+    { max: 300000, rate: 1000 },
+    { max: null, rate: 1500 },
+  ]),
 } = process.env;
+
+let shippingTiers = [];
+try {
+  shippingTiers = JSON.parse(SHIPPING_TIERS);
+} catch (e) {
+  console.error('Invalid SHIPPING_TIERS JSON — shipping estimates disabled:', e.message);
+}
+function calcShipping(subtotal) {
+  if (!shippingTiers.length) return null;
+  for (const tier of shippingTiers) {
+    if (tier.max === null || subtotal <= tier.max) return tier.rate;
+  }
+  return shippingTiers[shippingTiers.length - 1].rate;
+}
 
 // ---------------------------------------------------------------------------
 // DB
@@ -105,6 +132,29 @@ db.exec(`
     db.exec('ALTER TABLE hotspot_products ADD COLUMN variant_title TEXT');
   }
 }
+
+// Every quote request a customer submits, so staff can review who's used
+// the builder and what they were interested in, without digging through
+// Shopify draft orders or an inbox to find it.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS quote_requests (
+    id TEXT PRIMARY KEY,
+    created_at TEXT DEFAULT (datetime('now')),
+    vehicle_name TEXT,
+    vehicle_slug TEXT,
+    first_name TEXT,
+    last_name TEXT,
+    company TEXT,
+    vat TEXT,
+    email TEXT,
+    phone TEXT,
+    address TEXT,
+    items_json TEXT,
+    total TEXT,
+    draft_order_id TEXT,
+    draft_order_name TEXT
+  );
+`);
 
 // Fetch a vehicle's hotspots with their curated/collection product lists attached.
 function getHotspotsForVehicle(vehicleId) {
@@ -380,6 +430,7 @@ async function sendQuoteEmail({ vehicleName, customer, items, draftOrder }) {
     return;
   }
   const total = items.reduce((sum, i) => sum + (Number(i.price) || 0), 0);
+  const shipping = calcShipping(total);
   const itemLines = items
     .map((i) => {
       const variantBit = i.variantTitle && i.variantTitle !== 'Default Title' ? ` — ${i.variantTitle}` : '';
@@ -407,7 +458,9 @@ async function sendQuoteEmail({ vehicleName, customer, items, draftOrder }) {
       'Items:',
       itemLines,
       '',
-      `Total: R ${total.toLocaleString('en-ZA')}`,
+      `Subtotal: R ${total.toLocaleString('en-ZA')}`,
+      shipping !== null ? `Estimated shipping: R ${shipping.toLocaleString('en-ZA')}` : '',
+      shipping !== null ? `Estimated total: R ${(total + shipping).toLocaleString('en-ZA')}` : '',
       draftLink ? `\nDraft order: ${draftLink}` : '',
     ]
       .filter(Boolean)
@@ -492,6 +545,22 @@ app.post('/api/admin/upload-image', upload.single('image'), async (req, res) => 
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Quote requests (admin only)
+// ---------------------------------------------------------------------------
+app.get('/api/admin/quote-requests', (req, res) => {
+  const rows = db.prepare('SELECT * FROM quote_requests ORDER BY created_at DESC').all();
+  res.json(
+    rows.map((r) => ({
+      ...r,
+      items: JSON.parse(r.items_json || '[]'),
+      draftOrderUrl: r.draft_order_id
+        ? `https://${SHOPIFY_STORE_DOMAIN}/admin/draft_orders/${r.draft_order_id.split('/').pop()}`
+        : null,
+    }))
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -806,6 +875,8 @@ app.post('/api/quote-request', async (req, res) => {
 
     const lineItems = items.filter((i) => i.variantId).map((i) => ({ variantId: i.variantId, quantity: 1 }));
     const fullName = `${customer.firstName} ${customer.lastName}`.trim();
+    const total = items.reduce((sum, i) => sum + (Number(i.price) || 0), 0);
+    const shipping = calcShipping(total);
 
     let draftOrder = null;
     if (lineItems.length) {
@@ -815,6 +886,9 @@ app.post('/api/quote-request', async (req, res) => {
         customer.company ? `Company: ${customer.company}.` : null,
         customer.vat ? `VAT number: ${customer.vat}.` : null,
         `Shipping address: ${customer.address}`,
+        shipping !== null
+          ? `Items subtotal: R ${total.toLocaleString('en-ZA')} · Estimated shipping: R ${shipping.toLocaleString('en-ZA')} · Estimated total: R ${(total + shipping).toLocaleString('en-ZA')}`
+          : null,
       ].filter(Boolean);
 
       // Best-effort — if Shopify rejects the draft order for any reason, the
@@ -850,6 +924,33 @@ app.post('/api/quote-request', async (req, res) => {
       }
     }
 
+    // Save this regardless of how the draft order / email attempts above
+    // went — the admin dashboard needs a record of the request either way.
+    try {
+      db.prepare(
+        `INSERT INTO quote_requests
+          (id, vehicle_name, vehicle_slug, first_name, last_name, company, vat, email, phone, address, items_json, total, draft_order_id, draft_order_name)
+         VALUES (@id, @vehicleName, @vehicleSlug, @firstName, @lastName, @company, @vat, @email, @phone, @address, @itemsJson, @total, @draftOrderId, @draftOrderName)`
+      ).run({
+        id: newId(),
+        vehicleName: vehicleName || null,
+        vehicleSlug: vehicleSlug || null,
+        firstName: customer.firstName,
+        lastName: customer.lastName,
+        company: customer.company || null,
+        vat: customer.vat || null,
+        email: customer.email,
+        phone: customer.phone,
+        address: customer.address,
+        itemsJson: JSON.stringify(items),
+        total: String(total),
+        draftOrderId: draftOrder ? draftOrder.id : null,
+        draftOrderName: draftOrder ? draftOrder.name : null,
+      });
+    } catch (dbErr) {
+      console.error('Failed to save quote request record:', dbErr);
+    }
+
     // Fire-and-forget — the customer's response must never wait on SMTP.
     // Even with the timeouts above, there's no reason to make them sit
     // through it; log-and-move-on is the right behavior here.
@@ -872,8 +973,22 @@ app.get('/embed.js', (req, res) => {
   var API_BASE = ${JSON.stringify(`${req.protocol}://${req.get('host')}`)};
   var STORE_LOGO = ${JSON.stringify(absoluteUrl(STORE_LOGO_URL))};
   var STORE_CONTACT = ${JSON.stringify(STORE_CONTACT || '')};
+  var SHIPPING_TIERS = ${JSON.stringify(shippingTiers)};
 
   function fmtZAR(n){ return n ? ('R ' + Number(n).toLocaleString('en-ZA')) : ''; }
+
+  // South Africa-only flat rate, tiered by order subtotal — mirrors the
+  // store's actual Shopify shipping zone. Returns null if no tiers are
+  // configured, so callers can hide the shipping line entirely rather than
+  // show a wrong R0.
+  function calcShipping(subtotal){
+    if(!SHIPPING_TIERS.length) return null;
+    for(var i=0;i<SHIPPING_TIERS.length;i++){
+      var tier = SHIPPING_TIERS[i];
+      if(tier.max === null || subtotal <= tier.max) return tier.rate;
+    }
+    return SHIPPING_TIERS[SHIPPING_TIERS.length-1].rate;
+  }
 
   function addToCart(variantId, btnEl, label){
     if(!variantId) return;
@@ -995,8 +1110,11 @@ app.get('/embed.js', (req, res) => {
       var ids = Object.keys(selected);
       if(ids.length === 0){ bulkBar.style.display = 'none'; return; }
       var total = ids.reduce(function(sum, id){ return sum + (Number(selected[id].price) || 0); }, 0);
+      var shipping = calcShipping(total);
       bulkBar.style.display = 'flex';
-      bulkCount.textContent = ids.length + ' item' + (ids.length===1?'':'s') + ' selected — ' + fmtZAR(total);
+      var text = ids.length + ' item' + (ids.length===1?'':'s') + ' selected — ' + fmtZAR(total);
+      if(shipping !== null){ text += ' + ' + fmtZAR(shipping) + ' shipping = ' + fmtZAR(total + shipping); }
+      bulkCount.textContent = text;
     }
 
     function toggleSelected(variantId, title, variantTitle, price, checked){
@@ -1033,17 +1151,26 @@ app.get('/embed.js', (req, res) => {
       var w = window.open('', '_blank');
       if(!w){ alert('Please allow pop-ups to save your build.'); return; }
       var total = ids.reduce(function(sum,id){ return sum + (Number(selected[id].price)||0); }, 0);
+      var shipping = calcShipping(total);
       var rows = ids.map(function(id){
         var it = selected[id];
         var variantBit = (it.variantTitle && it.variantTitle !== 'Default Title') ? (' — ' + it.variantTitle) : '';
         return '<tr><td style="padding:10px;border-bottom:1px solid #ddd;">' + (it.title||'') + variantBit + '</td><td style="padding:10px;border-bottom:1px solid #ddd;text-align:right;white-space:nowrap;">' + fmtZAR(it.price) + '</td></tr>';
       }).join('');
+      var totalsHtml = '<div class="subtotal">Subtotal: ' + fmtZAR(total) + '</div>';
+      if(shipping !== null){
+        totalsHtml += '<div class="subtotal">Estimated shipping (South Africa): ' + fmtZAR(shipping) + '</div>';
+        totalsHtml += '<div class="total">Estimated total: ' + fmtZAR(total + shipping) + '</div>';
+      } else {
+        totalsHtml += '<div class="total">Total: ' + fmtZAR(total) + '</div>';
+      }
       var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Your Build — ' + (data.name||'') + '</title>' +
         '<style>body{font-family:Arial,Helvetica,sans-serif;color:#222;max-width:640px;margin:40px auto;padding:0 20px;}' +
         'h1{font-size:22px;margin-bottom:4px;}.sub{color:#777;margin-bottom:24px;font-size:13px;}' +
-        'table{width:100%;border-collapse:collapse;margin-bottom:16px;}' +
+        'table{width:100%;border-collapse:collapse;margin-bottom:8px;}' +
         'th{text-align:left;padding:10px;border-bottom:2px solid #222;font-size:13px;}' +
-        '.total{font-size:18px;font-weight:700;text-align:right;margin-bottom:24px;}' +
+        '.subtotal{font-size:13px;color:#666;text-align:right;}' +
+        '.total{font-size:18px;font-weight:700;text-align:right;margin:6px 0 24px;}' +
         '.printbtn{padding:10px 18px;background:#d9a441;border:none;border-radius:4px;font-weight:700;cursor:pointer;font-size:13px;}' +
         '.pagefooter{margin-top:32px;padding-top:16px;border-top:1px solid #ddd;text-align:center;color:#888;font-size:12px;line-height:1.6;}' +
         '@media print{.printbtn{display:none;}}</style></head><body>' +
@@ -1052,9 +1179,9 @@ app.get('/embed.js', (req, res) => {
         '<div class="sub">Saved on ' + new Date().toLocaleDateString() + '</div>' +
         (data.image ? '<img src="' + data.image + '" style="width:100%;max-width:500px;border-radius:6px;margin-bottom:20px;">' : '') +
         '<table><thead><tr><th>Item</th><th style="text-align:right;">Price</th></tr></thead><tbody>' + rows + '</tbody></table>' +
-        '<div class="total">Total: ' + fmtZAR(total) + '</div>' +
+        totalsHtml +
         '<button class="printbtn" onclick="window.print()">Print / Save as PDF</button>' +
-        '<div class="pagefooter">Thanks for using Frikkie&#39;s Rig Builder!' + (STORE_CONTACT ? '<br>' + STORE_CONTACT : '') + '</div>' +
+        '<div class="pagefooter">Thanks for using Frikkie&#39;s Rig Builder!' + (STORE_CONTACT ? '<br>' + STORE_CONTACT : '') + (shipping !== null ? '<br>Shipping estimate is for South Africa only and may vary at checkout.' : '') + '</div>' +
         '</body></html>';
       w.document.write(html);
       w.document.close();

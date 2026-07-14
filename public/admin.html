@@ -116,6 +116,11 @@
     </div>
   </div>
 
+  <div style="display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:20px;">
+    <button class="tab-btn active" id="tabVehiclesBtn" style="font-family:'Oswald',sans-serif;font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:0.03em;background:none;border:none;color:var(--gold);padding:12px 6px;margin-right:22px;cursor:pointer;border-bottom:2px solid var(--gold);">Vehicles</button>
+    <button class="tab-btn" id="tabQuotesBtn" style="font-family:'Oswald',sans-serif;font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:0.03em;background:none;border:none;color:var(--parchment-dim);padding:12px 6px;margin-right:22px;cursor:pointer;border-bottom:2px solid transparent;">Quote Requests</button>
+  </div>
+
   <!-- Vehicle list view -->
   <div id="listView">
     <div style="margin-bottom:18px;">
@@ -130,6 +135,13 @@
       <input type="file" id="importVehiclesInput" accept="application/json" style="display:none;">
     </div>
     <div class="grid-list" id="vehicleGrid"></div>
+  </div>
+
+  <!-- Quote requests view -->
+  <div id="quotesView" class="hidden">
+    <input type="text" id="quoteFilter" placeholder="Filter by name, email, company, or vehicle…" style="width:100%;max-width:420px;margin-bottom:16px;background:var(--panel-2);border:1px solid var(--line);color:var(--parchment);padding:10px;border-radius:3px;font-family:'Inter',sans-serif;font-size:13px;">
+    <div id="quotesList" style="display:flex;flex-direction:column;gap:10px;"></div>
+    <div class="empty-note" id="quotesEmptyNote" style="display:none;margin-top:10px;">No quote requests yet.</div>
   </div>
 
   <!-- Editor view -->
@@ -258,6 +270,7 @@
 <script>
 let session = false;
 let vehicles = [];
+let quoteRequests = [];
 let current = null; // {id, name, imageUrl, hotspots:[...]}
 let activePinId = null;
 let dragging = null;
@@ -270,6 +283,90 @@ async function api(path, opts={}){
     ...opts,
   });
 }
+
+// ---- Tabs ----
+function showVehiclesTab(){
+  document.getElementById('tabVehiclesBtn').classList.add('active');
+  document.getElementById('tabVehiclesBtn').style.color = 'var(--gold)';
+  document.getElementById('tabVehiclesBtn').style.borderBottomColor = 'var(--gold)';
+  document.getElementById('tabQuotesBtn').classList.remove('active');
+  document.getElementById('tabQuotesBtn').style.color = 'var(--parchment-dim)';
+  document.getElementById('tabQuotesBtn').style.borderBottomColor = 'transparent';
+  document.getElementById('listView').classList.remove('hidden');
+  document.getElementById('quotesView').classList.add('hidden');
+  document.getElementById('editorView').classList.add('hidden');
+}
+function showQuotesTab(){
+  document.getElementById('tabQuotesBtn').classList.add('active');
+  document.getElementById('tabQuotesBtn').style.color = 'var(--gold)';
+  document.getElementById('tabQuotesBtn').style.borderBottomColor = 'var(--gold)';
+  document.getElementById('tabVehiclesBtn').classList.remove('active');
+  document.getElementById('tabVehiclesBtn').style.color = 'var(--parchment-dim)';
+  document.getElementById('tabVehiclesBtn').style.borderBottomColor = 'transparent';
+  document.getElementById('quotesView').classList.remove('hidden');
+  document.getElementById('listView').classList.add('hidden');
+  document.getElementById('editorView').classList.add('hidden');
+  loadQuoteRequests();
+}
+document.getElementById('tabVehiclesBtn').addEventListener('click', showVehiclesTab);
+document.getElementById('tabQuotesBtn').addEventListener('click', showQuotesTab);
+
+// ---- Quote requests ----
+async function loadQuoteRequests(){
+  const res = await api('/api/admin/quote-requests');
+  quoteRequests = await res.json();
+  renderQuotesList();
+}
+
+function renderQuotesList(){
+  const list = document.getElementById('quotesList');
+  const q = (document.getElementById('quoteFilter').value || '').toLowerCase().trim();
+  const filtered = !q ? quoteRequests : quoteRequests.filter(r=>{
+    const hay = [r.first_name, r.last_name, r.company, r.email, r.vehicle_name].filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+  document.getElementById('quotesEmptyNote').style.display = quoteRequests.length ? 'none' : 'block';
+  list.innerHTML = '';
+  filtered.forEach(r=>{
+    const card = document.createElement('div');
+    card.style.cssText = 'background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px;';
+    const when = new Date(r.created_at + 'Z').toLocaleString('en-ZA', {dateStyle:'medium', timeStyle:'short'});
+    const itemsHtml = r.items.map(it=>{
+      const variantBit = (it.variantTitle && it.variantTitle !== 'Default Title') ? (' — ' + it.variantTitle) : '';
+      return `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12.5px;color:var(--parchment-dim);"><span>${it.title||''}${variantBit}</span><span>R ${Number(it.price||0).toLocaleString('en-ZA')}</span></div>`;
+    }).join('');
+    const relatedVehicle = vehicles.find(v=>v.slug === r.vehicle_slug);
+    card.innerHTML = `
+      <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+        <div>
+          <div style="font-family:'Oswald',sans-serif;font-weight:600;font-size:15px;">${r.first_name} ${r.last_name}${r.company ? ' · ' + r.company : ''}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--khaki);margin-top:2px;">${when} · ${r.vehicle_name||'—'}</div>
+        </div>
+        <div style="text-align:right;font-family:'Oswald',sans-serif;font-weight:600;font-size:16px;color:var(--gold);">R ${Number(r.total||0).toLocaleString('en-ZA')}</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:6px;font-size:12.5px;color:var(--parchment-dim);margin-bottom:10px;">
+        <div><a href="mailto:${r.email}" style="color:var(--parchment);">${r.email}</a></div>
+        <div><a href="tel:${r.phone}" style="color:var(--parchment);">${r.phone}</a></div>
+        ${r.vat ? `<div>VAT: ${r.vat}</div>` : ''}
+        <div style="grid-column:1/-1;">${r.address||''}</div>
+      </div>
+      <div style="border-top:1px dashed var(--line);padding-top:8px;margin-bottom:10px;">${itemsHtml}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${r.draftOrderUrl ? `<a href="${r.draftOrderUrl}" target="_blank" class="btn" style="text-decoration:none;font-size:11.5px;padding:8px 12px;">View draft order</a>` : ''}
+        ${relatedVehicle ? `<button class="btn" style="font-size:11.5px;padding:8px 12px;" data-goto-vehicle="${relatedVehicle.id}">View vehicle in admin</button>` : ''}
+      </div>
+    `;
+    const gotoBtn = card.querySelector('[data-goto-vehicle]');
+    if(gotoBtn){
+      gotoBtn.addEventListener('click', ()=>{
+        showVehiclesTab();
+        openEditor(relatedVehicle);
+      });
+    }
+    list.appendChild(card);
+  });
+}
+document.getElementById('quoteFilter').addEventListener('input', renderQuotesList);
 
 // ---- Vehicle list ----
 async function loadVehicles(){
