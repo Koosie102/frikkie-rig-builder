@@ -293,8 +293,20 @@ function renderList(){
     const years = v.year_from ? (v.year_from + (v.year_to ? ('–' + v.year_to) : '+')) : '';
     const tax = [v.make, v.model, v.submodel, years].filter(Boolean).join(' · ');
     card.innerHTML = `<img src="${v.image_url || ''}" onerror="this.style.display='none'">
-      <div class="body"><div class="name">${v.name}</div><div class="meta">${tax ? tax + ' · ' : ''}${v.hotspots.length} hotspot${v.hotspots.length===1?'':'s'}</div></div>`;
+      <div class="body">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
+          <div style="min-width:0;">
+            <div class="name">${v.name}</div>
+            <div class="meta">${tax ? tax + ' · ' : ''}${v.hotspots.length} hotspot${v.hotspots.length===1?'':'s'}</div>
+          </div>
+          <button class="dup-btn" title="Duplicate this vehicle" style="flex:none;background:var(--panel-2);border:1px solid var(--line);color:var(--parchment-dim);border-radius:3px;padding:5px 8px;cursor:pointer;font-size:14px;line-height:1;">⧉</button>
+        </div>
+      </div>`;
     card.onclick = ()=> openEditor(v);
+    card.querySelector('.dup-btn').addEventListener('click', (e)=>{
+      e.stopPropagation();
+      duplicateVehicle(v);
+    });
     grid.appendChild(card);
   });
   const newCard = document.createElement('div');
@@ -302,6 +314,18 @@ function renderList(){
   newCard.textContent = '+ New vehicle';
   newCard.onclick = ()=> openEditor(null);
   grid.appendChild(newCard);
+}
+
+function duplicateVehicle(v){
+  const clone = JSON.parse(JSON.stringify(v));
+  clone.id = null;
+  clone.slug = null;
+  clone.name = v.name + ' (Copy)';
+  // Hotspot IDs must be cleared too — if we saved with the original IDs still
+  // attached, the new vehicle's hotspot rows would collide with the
+  // original's in the database instead of being created fresh.
+  clone.hotspots = (clone.hotspots || []).map(h => ({ ...h, id: null }));
+  openEditor(clone);
 }
 document.getElementById('vehicleFilter').addEventListener('input', renderList);
 
