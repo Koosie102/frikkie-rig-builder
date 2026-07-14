@@ -16,6 +16,7 @@ const {
   SHOPIFY_API_VERSION = '2025-01',
   STOREFRONT_URL = '',
   STORE_LOGO_URL = '',
+  STORE_CONTACT = '',
   DATABASE_PATH = './data/hotspots.db',
   SMTP_HOST = '',
   SMTP_PORT = '587',
@@ -863,6 +864,8 @@ app.get('/embed.js', (req, res) => {
   res.type('application/javascript').send(`
 (function(){
   var API_BASE = ${JSON.stringify(`${req.protocol}://${req.get('host')}`)};
+  var STORE_LOGO = ${JSON.stringify(STORE_LOGO_URL || '')};
+  var STORE_CONTACT = ${JSON.stringify(STORE_CONTACT || '')};
 
   function fmtZAR(n){ return n ? ('R ' + Number(n).toLocaleString('en-ZA')) : ''; }
 
@@ -1036,13 +1039,16 @@ app.get('/embed.js', (req, res) => {
         'th{text-align:left;padding:10px;border-bottom:2px solid #222;font-size:13px;}' +
         '.total{font-size:18px;font-weight:700;text-align:right;margin-bottom:24px;}' +
         '.printbtn{padding:10px 18px;background:#d9a441;border:none;border-radius:4px;font-weight:700;cursor:pointer;font-size:13px;}' +
+        '.pagefooter{margin-top:32px;padding-top:16px;border-top:1px solid #ddd;text-align:center;color:#888;font-size:12px;line-height:1.6;}' +
         '@media print{.printbtn{display:none;}}</style></head><body>' +
+        (STORE_LOGO ? '<img src="' + STORE_LOGO + '" style="height:44px;margin-bottom:20px;display:block;">' : '') +
         '<h1>Your Build — ' + (data.name||'') + '</h1>' +
         '<div class="sub">Saved on ' + new Date().toLocaleDateString() + '</div>' +
         (data.image ? '<img src="' + data.image + '" style="width:100%;max-width:500px;border-radius:6px;margin-bottom:20px;">' : '') +
         '<table><thead><tr><th>Item</th><th style="text-align:right;">Price</th></tr></thead><tbody>' + rows + '</tbody></table>' +
         '<div class="total">Total: ' + fmtZAR(total) + '</div>' +
         '<button class="printbtn" onclick="window.print()">Print / Save as PDF</button>' +
+        '<div class="pagefooter">Thanks for using Frikkie&#39;s Rig Builder!' + (STORE_CONTACT ? '<br>' + STORE_CONTACT : '') + '</div>' +
         '</body></html>';
       w.document.write(html);
       w.document.close();
