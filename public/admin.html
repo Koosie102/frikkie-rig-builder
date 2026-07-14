@@ -337,11 +337,11 @@ document.getElementById('importVehiclesInput').addEventListener('change', async 
           hotspots: (v.hotspots||[]).map(h=>({
             id:h.id, x:h.x, y:h.y, label:h.label, desc:h.desc, mode: h.mode || 'single',
             productId:h.product_id, productHandle:h.product_handle, productTitle:h.product_title,
-            productPrice:h.product_price, productImage:h.product_image, variantId:h.variant_id,
+            productPrice:h.product_price, productImage:h.product_image, variantId:h.variant_id, variantTitle:h.variant_title,
             collectionId:h.collection_id, collectionHandle:h.collection_handle, collectionTitle:h.collection_title,
             products:(h.products||[]).map(p=>({
               productId:p.product_id, handle:p.product_handle, title:p.product_title,
-              price:p.product_price, image:p.product_image, variantId:p.variant_id
+              price:p.product_price, image:p.product_image, variantId:p.variant_id, variantTitle:p.variant_title
             }))
           }))
         })
@@ -372,11 +372,11 @@ function openEditor(v){
       id:h.id, x:h.x, y:h.y, label:h.label, desc:h.desc,
       mode: h.mode || 'single',
       productId:h.product_id, productHandle:h.product_handle, productTitle:h.product_title,
-      productPrice:h.product_price, productImage:h.product_image, variantId:h.variant_id,
+      productPrice:h.product_price, productImage:h.product_image, variantId:h.variant_id, variantTitle:h.variant_title,
       collectionId: h.collection_id, collectionHandle: h.collection_handle, collectionTitle: h.collection_title,
       products: (h.products||[]).map(p=>({
         productId:p.product_id, handle:p.product_handle, title:p.product_title,
-        price:p.product_price, image:p.product_image, variantId:p.variant_id
+        price:p.product_price, image:p.product_image, variantId:p.variant_id, variantTitle:p.variant_title
       }))
     }))
   } : { id:null, name:'', imageUrl:null, slug:null, make:'', model:'', submodel:'', yearFrom:'', yearTo:'', hotspots:[] };
@@ -566,9 +566,10 @@ function renderPickedProduct(h){
   const el = document.getElementById('pickedProduct');
   if(!h.productTitle){ el.innerHTML = ''; return; }
   const variants = h.availableVariants || [];
+  const variantBit = (h.variantTitle && h.variantTitle !== 'Default Title') ? ` (${h.variantTitle})` : '';
   el.innerHTML = `<div class="picked-product">
     <img src="${h.productImage||''}" onerror="this.style.display='none'">
-    <div class="t">${h.productTitle}</div>
+    <div class="t">${h.productTitle}${variantBit}</div>
     <div class="p">R ${Number(h.productPrice||0).toLocaleString('en-ZA')}</div>
   </div>`;
   if(variants.length > 1){
@@ -590,6 +591,7 @@ function renderPickedProduct(h){
       if(!chosen) return;
       h.variantId = chosen.variantId;
       h.productPrice = chosen.price;
+      h.variantTitle = chosen.title;
       renderPickedProduct(h);
     });
     wrap.appendChild(sel);
@@ -632,6 +634,7 @@ document.getElementById('f_search').addEventListener('input', (e)=>{
         h.productId = p.productId; h.productHandle = p.handle; h.productTitle = p.title;
         h.productPrice = p.price; h.productImage = p.image; h.variantId = p.variantId;
         h.availableVariants = p.variants || [];
+        h.variantTitle = (p.variants && p.variants[0]) ? p.variants[0].title : null;
         box.classList.add('hidden');
         document.getElementById('f_search').value = '';
         renderPickedProduct(h); renderPinList();
@@ -707,7 +710,7 @@ document.getElementById('f_multiSearch').addEventListener('input', (e)=>{
       item.onclick = ()=>{
         const h = current.hotspots.find(h=>h.id===activePinId); if(!h) return;
         if(!h.products) h.products = [];
-        h.products.push({ productId:p.productId, handle:p.handle, title:p.title, price:p.price, image:p.image, variantId:p.variantId, availableVariants: p.variants || [] });
+        h.products.push({ productId:p.productId, handle:p.handle, title:p.title, price:p.price, image:p.image, variantId:p.variantId, availableVariants: p.variants || [], variantTitle: (p.variants && p.variants[0]) ? p.variants[0].title : null });
         box.classList.add('hidden');
         document.getElementById('f_multiSearch').value = '';
         renderMultiProductList(h);
@@ -732,7 +735,8 @@ function renderMultiProductList(h){
     del.textContent = '✕';
     del.style.cssText = 'cursor:pointer;color:var(--khaki);margin-left:6px;flex:none;';
     del.onclick = ()=>{ h.products.splice(i,1); renderMultiProductList(h); renderPinList(); };
-    row.innerHTML = `<img src="${p.image||''}" onerror="this.style.display='none'"><div class="t">${p.title}</div><div class="p">R ${Number(p.price||0).toLocaleString('en-ZA')}</div>`;
+    const variantBit = (p.variantTitle && p.variantTitle !== 'Default Title') ? ` (${p.variantTitle})` : '';
+    row.innerHTML = `<img src="${p.image||''}" onerror="this.style.display='none'"><div class="t">${p.title}${variantBit}</div><div class="p">R ${Number(p.price||0).toLocaleString('en-ZA')}</div>`;
     row.appendChild(del);
     wrap.appendChild(row);
 
@@ -752,6 +756,7 @@ function renderMultiProductList(h){
         if(!chosen) return;
         p.variantId = chosen.variantId;
         p.price = chosen.price;
+        p.variantTitle = chosen.title;
         renderMultiProductList(h);
       });
       wrap.appendChild(sel);

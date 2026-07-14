@@ -73,6 +73,7 @@ db.exec(`
   addCol('collection_id', 'TEXT');
   addCol('collection_handle', 'TEXT');
   addCol('collection_title', 'TEXT');
+  addCol('variant_title', 'TEXT');
 }
 
 // Curated / collection product lists for a hotspot in 'multi' or 'collection' mode.
@@ -89,6 +90,12 @@ db.exec(`
     variant_id TEXT
   );
 `);
+{
+  const cols = db.prepare("PRAGMA table_info(hotspot_products)").all().map((c) => c.name);
+  if (!cols.includes('variant_title')) {
+    db.exec('ALTER TABLE hotspot_products ADD COLUMN variant_title TEXT');
+  }
+}
 
 // Fetch a vehicle's hotspots with their curated/collection product lists attached.
 function getHotspotsForVehicle(vehicleId) {
@@ -200,6 +207,24 @@ async function getProductVariants(productId) {
   }));
 }
 
+// Look up one specific variant directly — used on refresh so a hotspot
+// pointing at a non-default variant gets THAT variant's current price/title,
+// not the product's first variant.
+async function getVariantDetails(variantId) {
+  const data = await shopifyGraphQL(
+    `query($id: ID!) {
+      productVariant(id: $id) {
+        title
+        price
+        image { url }
+        product { title featuredImage { url } }
+      }
+    }`,
+    { id: variantId }
+  );
+  return data.productVariant;
+}
+
 // Search collections by title for the admin hotspot picker.
 async function searchShopifyCollections(q) {
   const data = await shopifyGraphQL(
@@ -229,7 +254,7 @@ async function getCollectionProducts(collectionId, limit = 20) {
             title
             handle
             featuredImage { url }
-            variants(first: 1) { edges { node { id price } } }
+            variants(first: 1) { edges { node { id title price } } }
           } }
         }
       }
@@ -243,6 +268,7 @@ async function getCollectionProducts(collectionId, limit = 20) {
     handle: node.handle,
     image: node.featuredImage ? node.featuredImage.url : null,
     variantId: node.variants.edges[0] ? node.variants.edges[0].node.id : null,
+    variantTitle: node.variants.edges[0] ? node.variants.edges[0].node.title : null,
     price: node.variants.edges[0] ? node.variants.edges[0].node.price : null,
   }));
 }
@@ -436,15 +462,15 @@ app.post('/api/admin/vehicles', (req, res) => {
   const clearHotspots = db.prepare('DELETE FROM hotspots WHERE vehicle_id = ?');
   const insertHotspot = db.prepare(`
     INSERT INTO hotspots (id, vehicle_id, sort_order, x, y, label, desc, mode,
-      product_id, product_handle, product_title, product_price, product_image, variant_id,
+      product_id, product_handle, product_title, product_price, product_image, variant_id, variant_title,
       collection_id, collection_handle, collection_title)
     VALUES (@id, @vehicleId, @sortOrder, @x, @y, @label, @desc, @mode,
-      @productId, @productHandle, @productTitle, @productPrice, @productImage, @variantId,
+      @productId, @productHandle, @productTitle, @productPrice, @productImage, @variantId, @variantTitle,
       @collectionId, @collectionHandle, @collectionTitle)
   `);
   const insertHotspotProduct = db.prepare(`
-    INSERT INTO hotspot_products (id, hotspot_id, sort_order, product_id, product_handle, product_title, product_price, product_image, variant_id)
-    VALUES (@id, @hotspotId, @sortOrder, @productId, @productHandle, @productTitle, @productPrice, @productImage, @variantId)
+    INSERT INTO hotspot_products (id, hotspot_id, sort_order, product_id, product_handle, product_title, product_price, product_image, variant_id, variant_title)
+    VALUES (@id, @hotspotId, @sortOrder, @productId, @productHandle, @productTitle, @productPrice, @productImage, @variantId, @variantTitle)
   `);
 
   const tx = db.transaction(() => {
@@ -473,6 +499,7 @@ app.post('/api/admin/vehicles', (req, res) => {
         productPrice: h.productPrice || null,
         productImage: h.productImage || null,
         variantId: h.variantId || null,
+        variantTitle: h.variantTitle || null,
         collectionId: h.collectionId || null,
         collectionHandle: h.collectionHandle || null,
         collectionTitle: h.collectionTitle || null,
@@ -489,6 +516,7 @@ app.post('/api/admin/vehicles', (req, res) => {
             productPrice: p.price || null,
             productImage: p.image || null,
             variantId: p.variantId || null,
+            variantTitle: p.variantTitle || null,
           });
         });
       }
@@ -514,17 +542,17 @@ app.post('/api/admin/vehicles/:id/refresh', async (req, res) => {
       .prepare('SELECT * FROM hotspots WHERE vehicle_id = ?')
       .all(req.params.id);
     const updateSingle = db.prepare(`
-      UPDATE hotspots SET product_title=@title, product_price=@price, product_image=@image
+      UPDATE hotspots SET product_title=@title, product_price=@price, product_image=@image, variant_title=@variantTitle
       WHERE id=@id
     `);
     const updateHotspotProduct = db.prepare(`
-      UPDATE hotspot_products SET product_title=@title, product_price=@price, product_image=@image
+      UPDATE hotspot_products SET product_title=@title, product_price=@price, product_image=@image, variant_title=@variantTitle
       WHERE id=@id
     `);
     const deleteHotspotProducts = db.prepare('DELETE FROM hotspot_products WHERE hotspot_id = ?');
     const insertHotspotProduct = db.prepare(`
-      INSERT INTO hotspot_products (id, hotspot_id, sort_order, product_id, product_handle, product_title, product_price, product_image, variant_id)
-      VALUES (@id, @hotspotId, @sortOrder, @productId, @productHandle, @productTitle, @productPrice, @productImage, @variantId)
+      INSERT INTO hotspot_products (id, hotspot_id, sort_order, product_id, product_handle, product_title, product_price, product_image, variant_id, variant_title)
+      VALUES (@id, @hotspotId, @sortOrder, @productId, @productHandle, @productTitle, @productPrice, @productImage, @variantId, @variantTitle)
     `);
     const fetchProduct = (productId) =>
       shopifyGraphQL(
@@ -532,25 +560,47 @@ app.post('/api/admin/vehicles/:id/refresh', async (req, res) => {
           product(id: $id) {
             title
             featuredImage { url }
-            variants(first: 1) { edges { node { price } } }
+            variants(first: 1) { edges { node { price title } } }
           }
         }`,
         { id: productId }
       );
 
+    // Prefer re-pulling the exact chosen variant so refresh never silently
+    // swaps a hotspot back onto the product's default/first variant.
+    const refreshOne = async (productId, variantId, fallback) => {
+      if (variantId) {
+        const v = await getVariantDetails(variantId);
+        if (v) {
+          return {
+            title: v.product?.title || fallback.title,
+            price: v.price,
+            image: v.image?.url || v.product?.featuredImage?.url || fallback.image,
+            variantTitle: v.title,
+          };
+        }
+      }
+      if (!productId) return null;
+      const data = await fetchProduct(productId);
+      const p = data.product;
+      if (!p) return null;
+      return {
+        title: p.title,
+        price: p.variants.edges[0]?.node.price || fallback.price,
+        image: p.featuredImage?.url || fallback.image,
+        variantTitle: p.variants.edges[0]?.node.title || fallback.variantTitle,
+      };
+    };
+
     for (const h of hotspots) {
       const mode = h.mode || 'single';
       if (mode === 'single') {
         if (!h.product_id) continue;
-        const data = await fetchProduct(h.product_id);
-        const p = data.product;
-        if (!p) continue;
-        updateSingle.run({
-          id: h.id,
-          title: p.title,
-          price: p.variants.edges[0]?.node.price || h.product_price,
-          image: p.featuredImage?.url || h.product_image,
+        const result = await refreshOne(h.product_id, h.variant_id, {
+          title: h.product_title, price: h.product_price, image: h.product_image, variantTitle: h.variant_title,
         });
+        if (!result) continue;
+        updateSingle.run({ id: h.id, ...result });
       } else if (mode === 'collection' && h.collection_id) {
         const products = await getCollectionProducts(h.collection_id, 20);
         deleteHotspotProducts.run(h.id);
@@ -565,21 +615,18 @@ app.post('/api/admin/vehicles/:id/refresh', async (req, res) => {
             productPrice: p.price || null,
             productImage: p.image || null,
             variantId: p.variantId || null,
+            variantTitle: p.variantTitle || null,
           });
         });
       } else if (mode === 'multi') {
         const items = db.prepare('SELECT * FROM hotspot_products WHERE hotspot_id = ?').all(h.id);
         for (const item of items) {
           if (!item.product_id) continue;
-          const data = await fetchProduct(item.product_id);
-          const p = data.product;
-          if (!p) continue;
-          updateHotspotProduct.run({
-            id: item.id,
-            title: p.title,
-            price: p.variants.edges[0]?.node.price || item.product_price,
-            image: p.featuredImage?.url || item.product_image,
+          const result = await refreshOne(item.product_id, item.variant_id, {
+            title: item.product_title, price: item.product_price, image: item.product_image, variantTitle: item.variant_title,
           });
+          if (!result) continue;
+          updateHotspotProduct.run({ id: item.id, ...result });
         }
       }
     }
@@ -637,6 +684,7 @@ app.get('/api/vehicles/:slug', (req, res) => {
           image: h.product_image,
           handle: h.product_handle,
           variantId: h.variant_id,
+          variantTitle: h.variant_title,
           url: h.product_handle ? `${STOREFRONT_URL}/products/${h.product_handle}` : null,
         };
       }
@@ -649,6 +697,7 @@ app.get('/api/vehicles/:slug', (req, res) => {
           image: p.product_image,
           handle: p.product_handle,
           variantId: p.variant_id,
+          variantTitle: p.variant_title,
           url: p.product_handle ? `${STOREFRONT_URL}/products/${p.product_handle}` : null,
         })),
       };
@@ -812,8 +861,9 @@ app.get('/embed.js', (req, res) => {
             img.style.cssText = 'width:44px;height:44px;object-fit:cover;border-radius:2px;flex:none;';
             var mid = document.createElement('div');
             mid.style.cssText = 'flex:1;min-width:0;';
+            var variantBit = (p.variantTitle && p.variantTitle !== 'Default Title') ? (' — ' + p.variantTitle) : '';
             mid.innerHTML =
-              '<div style="font-size:13px;font-weight:600;">' + (p.title || '') + '</div>' +
+              '<div style="font-size:13px;font-weight:600;">' + (p.title || '') + variantBit + '</div>' +
               '<div style="font-size:12px;color:#a89f8c;">' + fmtZAR(p.price) + '</div>';
             var addRowBtn = document.createElement('button');
             addRowBtn.textContent = 'Add';
@@ -829,7 +879,8 @@ app.get('/embed.js', (req, res) => {
         } else {
           optionsBlock.style.display = 'none';
           singleBlock.style.display = 'block';
-          titleEl.textContent = h.title || '';
+          var singleVariantBit = (h.variantTitle && h.variantTitle !== 'Default Title') ? (' — ' + h.variantTitle) : '';
+          titleEl.textContent = (h.title || '') + singleVariantBit;
           descEl.textContent = h.desc || '';
           priceEl.textContent = fmtZAR(h.price);
           imgEl.src = h.image || '';
