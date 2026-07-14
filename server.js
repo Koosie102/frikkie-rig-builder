@@ -121,6 +121,12 @@ const slugify = (s) =>
   s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'vehicle';
 const newId = () => crypto.randomBytes(8).toString('hex');
 
+// Shopify CDN URLs are often protocol-relative (starting with "//"), which
+// resolves fine on a normal https:// page but breaks in a blank popup
+// window with no protocol to inherit (e.g. the "Save my build" print page).
+// Normalize once here so every usage is safe regardless of source format.
+const absoluteUrl = (url) => (url && url.startsWith('//') ? `https:${url}` : url || '');
+
 // ---------------------------------------------------------------------------
 // Shopify Admin API (Client Credentials Grant — same pattern as Frikkie)
 // ---------------------------------------------------------------------------
@@ -425,7 +431,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 app.get('/api/admin/config', (req, res) => {
-  res.json({ logoUrl: STORE_LOGO_URL || null });
+  res.json({ logoUrl: absoluteUrl(STORE_LOGO_URL) || null });
 });
 
 // ---------------------------------------------------------------------------
@@ -864,7 +870,7 @@ app.get('/embed.js', (req, res) => {
   res.type('application/javascript').send(`
 (function(){
   var API_BASE = ${JSON.stringify(`${req.protocol}://${req.get('host')}`)};
-  var STORE_LOGO = ${JSON.stringify(STORE_LOGO_URL || '')};
+  var STORE_LOGO = ${JSON.stringify(absoluteUrl(STORE_LOGO_URL))};
   var STORE_CONTACT = ${JSON.stringify(STORE_CONTACT || '')};
 
   function fmtZAR(n){ return n ? ('R ' + Number(n).toLocaleString('en-ZA')) : ''; }
@@ -1041,7 +1047,7 @@ app.get('/embed.js', (req, res) => {
         '.printbtn{padding:10px 18px;background:#d9a441;border:none;border-radius:4px;font-weight:700;cursor:pointer;font-size:13px;}' +
         '.pagefooter{margin-top:32px;padding-top:16px;border-top:1px solid #ddd;text-align:center;color:#888;font-size:12px;line-height:1.6;}' +
         '@media print{.printbtn{display:none;}}</style></head><body>' +
-        (STORE_LOGO ? '<img src="' + STORE_LOGO + '" style="height:44px;margin-bottom:20px;display:block;">' : '') +
+        (STORE_LOGO ? '<img src="' + STORE_LOGO + '" style="height:44px;margin-bottom:20px;display:block;" onerror="this.style.display=&#39;none&#39;">' : '') +
         '<h1>Your Build — ' + (data.name||'') + '</h1>' +
         '<div class="sub">Saved on ' + new Date().toLocaleDateString() + '</div>' +
         (data.image ? '<img src="' + data.image + '" style="width:100%;max-width:500px;border-radius:6px;margin-bottom:20px;">' : '') +
