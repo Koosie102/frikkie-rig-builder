@@ -4,6 +4,8 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const multer = require('multer');
+const cors = require('cors');
+const nodemailer = require('nodemailer');
 const Database = require('better-sqlite3');
 
 const {
@@ -15,6 +17,12 @@ const {
   STOREFRONT_URL = '',
   STORE_LOGO_URL = '',
   DATABASE_PATH = './data/hotspots.db',
+  SMTP_HOST = '',
+  SMTP_PORT = '587',
+  SMTP_USER = '',
+  SMTP_PASS = '',
+  SMTP_FROM = '',
+  NOTIFY_EMAIL = '',
 } = process.env;
 
 // ---------------------------------------------------------------------------
@@ -335,9 +343,76 @@ async function uploadImageToShopifyFiles(buffer, filename, mimeType) {
 }
 
 // ---------------------------------------------------------------------------
+// Email (quote request notifications)
+// ---------------------------------------------------------------------------
+let mailTransport; // undefined = not yet checked, null = not configured
+function getMailTransport() {
+  if (mailTransport !== undefined) return mailTransport;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+    mailTransport = null;
+    return null;
+  }
+  mailTransport = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: Number(SMTP_PORT) || 587,
+    secure: Number(SMTP_PORT) === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+  return mailTransport;
+}
+
+async function sendQuoteEmail({ vehicleName, customer, items, draftOrder }) {
+  const transport = getMailTransport();
+  if (!transport || !NOTIFY_EMAIL) {
+    console.warn('SMTP not configured (SMTP_HOST/SMTP_USER/SMTP_PASS/NOTIFY_EMAIL) — skipping quote notification email.');
+    return;
+  }
+  const total = items.reduce((sum, i) => sum + (Number(i.price) || 0), 0);
+  const itemLines = items
+    .map((i) => {
+      const variantBit = i.variantTitle && i.variantTitle !== 'Default Title' ? ` — ${i.variantTitle}` : '';
+      return `- ${i.title}${variantBit} — R ${Number(i.price || 0).toLocaleString('en-ZA')}`;
+    })
+    .join('\n');
+  const draftLink = draftOrder
+    ? `https://${SHOPIFY_STORE_DOMAIN}/admin/draft_orders/${draftOrder.id.split('/').pop()}`
+    : null;
+  const fullName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim();
+
+  await transport.sendMail({
+    from: SMTP_FROM || SMTP_USER,
+    to: NOTIFY_EMAIL,
+    subject: `Quote request — ${vehicleName || 'Rig Builder'} (${fullName})`,
+    text: [
+      'New quote request from the Rig Builder widget.',
+      '',
+      `Vehicle: ${vehicleName || '—'}`,
+      `Customer: ${fullName} <${customer.email}> — ${customer.phone || '—'}`,
+      customer.company ? `Company: ${customer.company}` : '',
+      customer.vat ? `VAT number: ${customer.vat}` : '',
+      `Shipping address: ${customer.address || '—'}`,
+      '',
+      'Items:',
+      itemLines,
+      '',
+      `Total: R ${total.toLocaleString('en-ZA')}`,
+      draftLink ? `\nDraft order: ${draftLink}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // App setup
 // ---------------------------------------------------------------------------
 const app = express();
+// Every /api/ route here is called cross-origin from whatever Shopify page
+// the widget is embedded on, so CORS needs to be open. There's no session/
+// cookie auth anywhere in this app (see README), so this doesn't widen what
+// a direct API caller could already do — it only affects browser JS running
+// on other sites, which could already curl these endpoints directly anyway.
+app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -643,7 +718,6 @@ app.post('/api/admin/vehicles/:id/refresh', async (req, res) => {
 // Lightweight list for the Make/Year/Model/Submodel picker — no hotspot data,
 // so it stays small even with a lot of vehicles.
 app.get('/api/vehicles-public', (req, res) => {
-  res.set('Access-Control-Allow-Origin', '*');
   const rows = db
     .prepare('SELECT slug, name, image_url, make, model, submodel, year_from, year_to FROM vehicles ORDER BY make, model, submodel')
     .all();
@@ -661,10 +735,9 @@ app.get('/api/vehicles-public', (req, res) => {
   );
 });
 
-// This runs on a different domain to the Shopify page that calls it, so it
-// needs CORS allowed explicitly or the browser blocks the fetch silently.
+// This runs on a different domain to the Shopify page that calls it — CORS
+// for it (and every other /api/ route) is handled globally, see app.use(cors()) above.
 app.get('/api/vehicles/:slug', (req, res) => {
-  res.set('Access-Control-Allow-Origin', '*');
   const v = db.prepare('SELECT * FROM vehicles WHERE slug = ?').get(req.params.slug);
   if (!v) return res.status(404).json({ error: 'Not found' });
   const getProducts = db.prepare(
@@ -703,6 +776,77 @@ app.get('/api/vehicles/:slug', (req, res) => {
       };
     });
   res.json({ name: v.name, slug: v.slug, image: v.image_url, hotspots });
+});
+
+// Customer submits their selected items + contact details from the widget.
+// Creates a real Shopify draft order (so pricing/stock is always Shopify's
+// live truth, never trusting client-supplied prices) and emails the store.
+// Body: { vehicleName, vehicleSlug, items:[{variantId,title,variantTitle,price}], customer:{name,email,phone} }
+app.post('/api/quote-request', async (req, res) => {
+  try {
+    const { vehicleName, vehicleSlug, items = [], customer = {} } = req.body || {};
+    if (!customer.firstName || !customer.lastName || !customer.email || !customer.phone || !customer.address) {
+      return res.status(400).json({ error: 'Name, surname, email, phone, and shipping address are required.' });
+    }
+    if (!Array.isArray(items) || !items.length) {
+      return res.status(400).json({ error: 'No items were selected.' });
+    }
+
+    const lineItems = items.filter((i) => i.variantId).map((i) => ({ variantId: i.variantId, quantity: 1 }));
+    const fullName = `${customer.firstName} ${customer.lastName}`.trim();
+
+    let draftOrder = null;
+    if (lineItems.length) {
+      const noteLines = [
+        `Quote request via Rig Builder — Vehicle: ${vehicleName || vehicleSlug || 'unknown'}.`,
+        `Customer: ${fullName}, ${customer.phone}.`,
+        customer.company ? `Company: ${customer.company}.` : null,
+        customer.vat ? `VAT number: ${customer.vat}.` : null,
+        `Shipping address: ${customer.address}`,
+      ].filter(Boolean);
+
+      // Best-effort — if Shopify rejects the draft order for any reason, the
+      // customer's request should still go through via the notification
+      // email below rather than failing outright.
+      try {
+        const result = await shopifyGraphQL(
+          `mutation($input: DraftOrderInput!) {
+            draftOrderCreate(input: $input) {
+              draftOrder { id name invoiceUrl totalPrice }
+              userErrors { field message }
+            }
+          }`,
+          {
+            input: {
+              lineItems,
+              email: customer.email,
+              phone: customer.phone,
+              note: noteLines.join('\n'),
+            },
+          }
+        );
+        if (result.draftOrderCreate.userErrors && result.draftOrderCreate.userErrors.length) {
+          console.error('draftOrderCreate errors:', result.draftOrderCreate.userErrors);
+        } else {
+          draftOrder = result.draftOrderCreate.draftOrder;
+        }
+      } catch (draftErr) {
+        console.error('draftOrderCreate failed:', draftErr);
+      }
+    }
+
+    // Best-effort — a broken SMTP config shouldn't fail the customer's request.
+    try {
+      await sendQuoteEmail({ vehicleName, customer, items, draftOrder });
+    } catch (mailErr) {
+      console.error('Quote email failed:', mailErr);
+    }
+
+    res.json({ ok: true, draftOrderName: draftOrder ? draftOrder.name : null });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not submit your request — please try again.' });
+  }
 });
 
 // Vanilla-JS embed script for Shopify Custom Liquid blocks.
@@ -762,7 +906,31 @@ app.get('/embed.js', (req, res) => {
         '</div>' +
         '<div class="' + uid + '-bulkbar" style="display:none;position:sticky;bottom:12px;margin-top:14px;background:#d9a441;color:#151310;border-radius:4px;padding:12px 16px;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">' +
           '<div class="' + uid + '-bulkCount" style="font-size:13px;font-weight:700;"></div>' +
-          '<button class="' + uid + '-bulkAdd" style="background:#151310;color:#ece4d3;border:none;font-weight:700;padding:10px 16px;border-radius:3px;font-size:12.5px;cursor:pointer;">Add selected to cart</button>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+            '<button class="' + uid + '-bulkSave" style="background:#151310;color:#ece4d3;border:none;font-weight:700;padding:10px 14px;border-radius:3px;font-size:12px;cursor:pointer;">Save my build</button>' +
+            '<button class="' + uid + '-bulkQuote" style="background:#151310;color:#ece4d3;border:none;font-weight:700;padding:10px 14px;border-radius:3px;font-size:12px;cursor:pointer;">Request quote</button>' +
+            '<button class="' + uid + '-bulkAdd" style="background:#151310;color:#ece4d3;border:none;font-weight:700;padding:10px 14px;border-radius:3px;font-size:12px;cursor:pointer;">Add selected to cart</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="' + uid + '-quoteModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;align-items:center;justify-content:center;padding:20px;">' +
+          '<div class="' + uid + '-quoteModalInner" style="background:#1c1914;border:1px solid #3a3428;border-radius:6px;padding:24px;max-width:420px;width:100%;max-height:90vh;overflow-y:auto;color:#ece4d3;">' +
+            '<div style="font-size:17px;font-weight:700;margin-bottom:4px;">Request a Quote</div>' +
+            '<div style="font-size:13px;color:#a89f8c;margin-bottom:16px;">We&#39;ll email you back with pricing and availability for your selected items.</div>' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">' +
+              '<input class="' + uid + '-qFirst" type="text" placeholder="Name" style="width:100%;padding:9px 10px;border-radius:3px;border:1px solid #3a3428;background:#211d17;color:#ece4d3;font-size:13px;box-sizing:border-box;">' +
+              '<input class="' + uid + '-qLast" type="text" placeholder="Surname" style="width:100%;padding:9px 10px;border-radius:3px;border:1px solid #3a3428;background:#211d17;color:#ece4d3;font-size:13px;box-sizing:border-box;">' +
+            '</div>' +
+            '<input class="' + uid + '-qCompany" type="text" placeholder="Company (optional)" style="width:100%;margin-bottom:8px;padding:9px 10px;border-radius:3px;border:1px solid #3a3428;background:#211d17;color:#ece4d3;font-size:13px;box-sizing:border-box;">' +
+            '<input class="' + uid + '-qVat" type="text" placeholder="VAT number (optional)" style="width:100%;margin-bottom:8px;padding:9px 10px;border-radius:3px;border:1px solid #3a3428;background:#211d17;color:#ece4d3;font-size:13px;box-sizing:border-box;">' +
+            '<input class="' + uid + '-qEmail" type="email" placeholder="Email" style="width:100%;margin-bottom:8px;padding:9px 10px;border-radius:3px;border:1px solid #3a3428;background:#211d17;color:#ece4d3;font-size:13px;box-sizing:border-box;">' +
+            '<input class="' + uid + '-qPhone" type="text" placeholder="Telephone number" style="width:100%;margin-bottom:8px;padding:9px 10px;border-radius:3px;border:1px solid #3a3428;background:#211d17;color:#ece4d3;font-size:13px;box-sizing:border-box;">' +
+            '<textarea class="' + uid + '-qAddress" placeholder="Shipping address" rows="3" style="width:100%;margin-bottom:14px;padding:9px 10px;border-radius:3px;border:1px solid #3a3428;background:#211d17;color:#ece4d3;font-size:13px;box-sizing:border-box;font-family:inherit;resize:vertical;"></textarea>' +
+            '<div class="' + uid + '-qStatus" style="font-size:12px;color:#c1541f;min-height:16px;margin-bottom:10px;"></div>' +
+            '<div style="display:flex;gap:8px;">' +
+              '<button class="' + uid + '-qCancel" style="flex:1;background:none;border:1px solid #6b6748;color:#ece4d3;padding:10px;border-radius:3px;font-size:12.5px;cursor:pointer;">Cancel</button>' +
+              '<button class="' + uid + '-qSubmit" style="flex:1;background:#d9a441;color:#151310;border:none;font-weight:700;padding:10px;border-radius:3px;font-size:12.5px;cursor:pointer;">Send request</button>' +
+            '</div>' +
+          '</div>' +
         '</div>' +
       '</div>' +
       '<style>' +
@@ -790,8 +958,21 @@ app.get('/embed.js', (req, res) => {
     var bulkBar = root.querySelector('.' + uid + '-bulkbar');
     var bulkCount = root.querySelector('.' + uid + '-bulkCount');
     var bulkAddBtn = root.querySelector('.' + uid + '-bulkAdd');
+    var bulkSaveBtn = root.querySelector('.' + uid + '-bulkSave');
+    var bulkQuoteBtn = root.querySelector('.' + uid + '-bulkQuote');
+    var quoteModal = root.querySelector('.' + uid + '-quoteModal');
+    var qFirst = root.querySelector('.' + uid + '-qFirst');
+    var qLast = root.querySelector('.' + uid + '-qLast');
+    var qCompany = root.querySelector('.' + uid + '-qCompany');
+    var qVat = root.querySelector('.' + uid + '-qVat');
+    var qEmail = root.querySelector('.' + uid + '-qEmail');
+    var qPhone = root.querySelector('.' + uid + '-qPhone');
+    var qAddress = root.querySelector('.' + uid + '-qAddress');
+    var qStatus = root.querySelector('.' + uid + '-qStatus');
+    var qSubmit = root.querySelector('.' + uid + '-qSubmit');
+    var qCancel = root.querySelector('.' + uid + '-qCancel');
     var activePin = null, activeData = null;
-    var selected = {}; // variantId -> { variantId, title, price }
+    var selected = {}; // variantId -> { variantId, title, variantTitle, price }
 
     function updateBulkBar(){
       var ids = Object.keys(selected);
@@ -801,9 +982,9 @@ app.get('/embed.js', (req, res) => {
       bulkCount.textContent = ids.length + ' item' + (ids.length===1?'':'s') + ' selected — ' + fmtZAR(total);
     }
 
-    function toggleSelected(variantId, title, price, checked){
+    function toggleSelected(variantId, title, variantTitle, price, checked){
       if(!variantId) return;
-      if(checked){ selected[variantId] = { variantId:variantId, title:title, price:price }; }
+      if(checked){ selected[variantId] = { variantId:variantId, title:title, variantTitle:variantTitle, price:price }; }
       else { delete selected[variantId]; }
       updateBulkBar();
     }
@@ -827,6 +1008,88 @@ app.get('/embed.js', (req, res) => {
           setTimeout(function(){ bulkAddBtn.textContent = original; }, 1500);
         } else { bulkAddBtn.textContent = 'Try again'; }
       }).catch(function(){ bulkAddBtn.textContent = 'Try again'; });
+    });
+
+    bulkSaveBtn.addEventListener('click', function(){
+      var ids = Object.keys(selected);
+      if(!ids.length) return;
+      var w = window.open('', '_blank');
+      if(!w){ alert('Please allow pop-ups to save your build.'); return; }
+      var total = ids.reduce(function(sum,id){ return sum + (Number(selected[id].price)||0); }, 0);
+      var rows = ids.map(function(id){
+        var it = selected[id];
+        var variantBit = (it.variantTitle && it.variantTitle !== 'Default Title') ? (' — ' + it.variantTitle) : '';
+        return '<tr><td style="padding:10px;border-bottom:1px solid #ddd;">' + (it.title||'') + variantBit + '</td><td style="padding:10px;border-bottom:1px solid #ddd;text-align:right;white-space:nowrap;">' + fmtZAR(it.price) + '</td></tr>';
+      }).join('');
+      var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Your Build — ' + (data.name||'') + '</title>' +
+        '<style>body{font-family:Arial,Helvetica,sans-serif;color:#222;max-width:640px;margin:40px auto;padding:0 20px;}' +
+        'h1{font-size:22px;margin-bottom:4px;}.sub{color:#777;margin-bottom:24px;font-size:13px;}' +
+        'table{width:100%;border-collapse:collapse;margin-bottom:16px;}' +
+        'th{text-align:left;padding:10px;border-bottom:2px solid #222;font-size:13px;}' +
+        '.total{font-size:18px;font-weight:700;text-align:right;margin-bottom:24px;}' +
+        '.printbtn{padding:10px 18px;background:#d9a441;border:none;border-radius:4px;font-weight:700;cursor:pointer;font-size:13px;}' +
+        '@media print{.printbtn{display:none;}}</style></head><body>' +
+        '<h1>Your Build — ' + (data.name||'') + '</h1>' +
+        '<div class="sub">Saved on ' + new Date().toLocaleDateString() + '</div>' +
+        (data.image ? '<img src="' + data.image + '" style="width:100%;max-width:500px;border-radius:6px;margin-bottom:20px;">' : '') +
+        '<table><thead><tr><th>Item</th><th style="text-align:right;">Price</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+        '<div class="total">Total: ' + fmtZAR(total) + '</div>' +
+        '<button class="printbtn" onclick="window.print()">Print / Save as PDF</button>' +
+        '</body></html>';
+      w.document.write(html);
+      w.document.close();
+    });
+
+    bulkQuoteBtn.addEventListener('click', function(){
+      if(!Object.keys(selected).length) return;
+      qStatus.textContent = '';
+      quoteModal.style.display = 'flex';
+    });
+    qCancel.addEventListener('click', function(){ quoteModal.style.display = 'none'; });
+    qSubmit.addEventListener('click', function(){
+      var firstName = qFirst.value.trim();
+      var lastName = qLast.value.trim();
+      var company = qCompany.value.trim();
+      var vat = qVat.value.trim();
+      var email = qEmail.value.trim();
+      var phone = qPhone.value.trim();
+      var address = qAddress.value.trim();
+      if(!firstName || !lastName || !email || !phone || !address){
+        qStatus.textContent = 'Please fill in name, surname, email, phone, and shipping address.';
+        return;
+      }
+      var items = Object.keys(selected).map(function(id){
+        var it = selected[id];
+        return { variantId: id, title: it.title, variantTitle: it.variantTitle, price: it.price };
+      });
+      qSubmit.disabled = true;
+      qSubmit.textContent = 'Sending…';
+      fetch(API_BASE + '/api/quote-request', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          vehicleName: data.name, vehicleSlug: data.slug, items: items,
+          customer: { firstName:firstName, lastName:lastName, company:company, vat:vat, email:email, phone:phone, address:address }
+        })
+      }).then(function(r){ return r.json(); }).then(function(resp){
+        if(resp.error){
+          qStatus.textContent = resp.error;
+          qSubmit.disabled = false;
+          qSubmit.textContent = 'Send request';
+          return;
+        }
+        var inner = root.querySelector('.' + uid + '-quoteModalInner');
+        inner.innerHTML =
+          '<div style="text-align:center;">' +
+            '<div style="font-size:16px;font-weight:700;margin-bottom:8px;">Request sent!</div>' +
+            '<div style="font-size:13px;color:#a89f8c;">We&#39;ll be in touch shortly with your quote.</div>' +
+          '</div>';
+        setTimeout(function(){ quoteModal.style.display = 'none'; }, 2500);
+      }).catch(function(){
+        qStatus.textContent = 'Something went wrong — please try again.';
+        qSubmit.disabled = false;
+        qSubmit.textContent = 'Send request';
+      });
     });
 
     data.hotspots.forEach(function(h){
@@ -855,7 +1118,7 @@ app.get('/embed.js', (req, res) => {
             check.type = 'checkbox';
             check.style.cssText = 'width:16px;height:16px;flex:none;cursor:pointer;';
             check.checked = !!selected[p.variantId];
-            check.addEventListener('change', function(){ toggleSelected(p.variantId, p.title, p.price, check.checked); });
+            check.addEventListener('change', function(){ toggleSelected(p.variantId, p.title, p.variantTitle, p.price, check.checked); });
             var img = document.createElement('img');
             img.src = p.image || '';
             img.style.cssText = 'width:44px;height:44px;object-fit:cover;border-radius:2px;flex:none;';
@@ -887,7 +1150,7 @@ app.get('/embed.js', (req, res) => {
           imgEl.style.display = h.image ? 'block' : 'none';
           linkEl.href = h.url || '#';
           singleCheck.checked = !!selected[h.variantId];
-          singleCheck.onchange = function(){ toggleSelected(h.variantId, h.title, h.price, singleCheck.checked); };
+          singleCheck.onchange = function(){ toggleSelected(h.variantId, h.title, h.variantTitle, h.price, singleCheck.checked); };
         }
       });
       pinLayer.appendChild(el);
